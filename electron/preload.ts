@@ -1,0 +1,95 @@
+import { contextBridge, ipcRenderer } from 'electron'
+
+contextBridge.exposeInMainWorld('electronAPI', {
+  getScreenshot: (type: 'region' | 'fullscreen' | 'window') =>
+    ipcRenderer.invoke('get-screenshot', type),
+
+  sendToPanel: (data: any) =>
+    ipcRenderer.invoke('send-to-panel', data),
+
+  hidePanel: () =>
+    ipcRenderer.invoke('hide-panel'),
+
+  minimizePanel: () =>
+    ipcRenderer.invoke('minimize-panel'),
+
+  resizePanel: (width: number, height: number) =>
+    ipcRenderer.invoke('resize-panel', width, height),
+
+  showPanel: () =>
+    ipcRenderer.invoke('show-panel'),
+
+  getSettings: () =>
+    ipcRenderer.invoke('get-settings'),
+
+  saveSettings: (settings: any) =>
+    ipcRenderer.invoke('save-settings', settings),
+
+  getHistory: () =>
+    ipcRenderer.invoke('get-history'),
+
+  saveHistory: (history: any[]) =>
+    ipcRenderer.invoke('save-history', history),
+
+  openSettings: () =>
+    ipcRenderer.invoke('open-settings'),
+
+  closeSettings: () =>
+    ipcRenderer.invoke('close-settings'),
+
+  toggleFullscreen: () =>
+    ipcRenderer.invoke('toggle-fullscreen'),
+
+  closeScreenshot: () =>
+    ipcRenderer.invoke('close-screenshot'),
+
+  screenshotCropped: (croppedImageData: string, customPrompt?: string) =>
+    ipcRenderer.invoke('screenshot-cropped', croppedImageData, customPrompt),
+
+  exitScreenshot: () =>
+    ipcRenderer.invoke('exit-screenshot'),
+
+  openSettingsFromScreenshot: () =>
+    ipcRenderer.invoke('open-settings-from-screenshot'),
+
+  movePanel: (x: number, y: number) =>
+    ipcRenderer.invoke('move-panel', x, y),
+
+  getPanelPosition: () =>
+    ipcRenderer.invoke('get-panel-position'),
+
+  getApiKey: () =>
+    ipcRenderer.invoke('get-api-key'),
+
+  getVersion: () =>
+    ipcRenderer.invoke('get-version'),
+
+  checkForUpdates: () =>
+    ipcRenderer.invoke('check-for-updates'),
+
+  downloadUpdate: () =>
+    ipcRenderer.invoke('download-update'),
+
+  installUpdate: () =>
+    ipcRenderer.invoke('install-update'),
+
+  onUpdateAvailable: (callback: (info: any) => void) => {
+    ipcRenderer.on('update-available', (_, info) => callback(info))
+  },
+
+  onUpdateDownloaded: (callback: (info: any) => void) => {
+    ipcRenderer.on('update-downloaded', (_, info) => callback(info))
+  },
+
+  onScreenshotTaken: (callback: (data: { type: string, dataUrl: string, customPrompt?: string }) => void) => {
+    ipcRenderer.on('screenshot-taken', (_, data) => callback(data))
+  },
+
+  onAIResponse: (callback: (data: any) => void) => {
+    ipcRenderer.on('ai-response', (_, data) => callback(data))
+  },
+
+  onSettingsUpdated: (callback: (settings: any) => void) => {
+    ipcRenderer.on('settings-updated', (_, settings) => callback(settings))
+  }
+})

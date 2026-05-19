@@ -1,0 +1,182 @@
+import { defineStore } from 'pinia'
+import { ref } from 'vue'
+
+interface Message {
+  role: string
+  content: string
+}
+
+export const useScreenshotStore = defineStore('screenshot', () => {
+  const currentImage = ref<string | null>(null)
+  const apiKey = ref<string>('')
+  const conversationId = ref<string>('')
+
+  const setCurrentImage = (image: string | null) => {
+    currentImage.value = image
+  }
+
+  const sendToAI = async (
+    userMessage: string,
+    history: Message[] = [],
+    imageData?: string,
+    onToken?: (token: string) => void
+  ): Promise<string> => {
+    const image = imageData || currentImage.value
+
+    if (!image) {
+      throw new Error('No image available')
+    }
+
+    let apiKeyValue = apiKey.value
+    let apiModel = 'doubao-vision-pro'
+    let apiBaseUrl = 'https://ark.cn-beijing.volces.com/api/v3'
+
+    const savedSettings = await window.electronAPI.getSettings()
+    if (savedSettings?.apiKey) {
+      apiKeyValue = savedSettings.apiKey
+      apiKey.value = apiKeyValue
+    }
+    if (savedSettings?.apiModel) {
+      apiModel = savedSettings.apiModel
+    }
+    if (savedSettings?.apiBaseUrl) {
+      apiBaseUrl = savedSettings.apiBaseUrl
+    }
+
+    if (!apiKeyValue) {
+      return '请先在设置中配置豆包 API Key'
+    }
+
+    const messages: Array<{
+      role: string
+      content: Array<{ type: string; image_url?: { url: string } | string; text?: string }>
+    }> = [
+      {
+        role: 'user',
+        content: [
+          { type: 'image_url', image_url: image },
+          { type: 'text', text: userMessage }
+        ]
+      }
+    ]
+
+    try {
+      const endpoint = apiBaseUrl.endsWith('/') ? apiBaseUrl + 'chat/completions' : apiBaseUrl + '/chat/completions'
+      console.log('API Request:', {
+        endpoint,
+        apiKeyValue: apiKeyValue ? apiKeyValue.substring(0, 10) + '...' : 'empty',
+        apiModel,
+        imageLength: image.length
+      })
+
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKeyValue}`
+        },
+        body: JSON.stringify({
+          model: apiModel,
+          messages: messages,
+          stream: true
+        })
+      })
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        console.error('API Error Response:', response.status, errorText)
+        throw new Error(`API request failed: ${response.status} - ${errorText}`)
+      }
+
+      const reader = response.body?.getReader()
+      if (!reader) {
+        throw new Error('No response body')
+      }
+
+      const decoder = new TextDecoder()
+      let fullContent = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        const chunk = decoder.decode(value, { stream: true })
+        const lines = chunk.split('\n')
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6)
+            if (data === '[DONE]') continue
+            try {
+              const parsed = JSON.parse(data)
+              const content = parsed.choices?.[0]?.delta?.content
+              if (content) {
+                fullContent += content
+                if (onToken) {
+                  onToken(content)
+                }
+              }
+            } catch (e) {
+              // Ignore parse errors for incomplete chunks
+            }
+          }
+        }
+      }
+
+      return fullContent || 'AI 未能返回有效回答'
+    } catch (error) {
+      console.error('AI API Error:', error)
+      return 'AI 服务暂时不可用: ' + (error as Error).message
+    }
+  }
+
+  const setApiKey = (key: string) => {
+    apiKey.value = key
+    localStorage.setItem('doubao_api_key', key)
+  }
+
+  return {
+    currentImage,
+    apiKey,
+    conversationId,
+    setCurrentImage,
+    sendToAI,
+    setApiKey
+  }
+})
+
+declare global {
+  interface Window {
+    electronAPI: {
+      getScreenshot: (type: 'region' | 'fullscreen' | 'window') => Promise<string | null>
+      sendToPanel: (data: any) => Promise<void>
+      hidePanel: () => Promise<void>
+      showPanel: () => Promise<void>
+      minimizePanel: () => Promise<void>
+      resizePanel: (width: number, height: number) => Promise<void>
+      getSettings: () => Promise<any>
+      saveSettings: (settings: any) => Promise<boolean>
+      getHistory: () => Promise<any[]>
+      saveHistory: (history: any[]) => Promise<boolean>
+      openSettings: () => Promise<void>
+      closeSettings: () => Promise<void>
+      closeScreenshot: () => Promise<void>
+      screenshotCropped: (croppedImageData: string, customPrompt?: string) => Promise<void>
+      movePanel: (x: number, y: number) => Promise<void>
+      getPanelPosition: () => Promise<[number, number]>
+      getApiKey: () => Promise<string>
+      getVersion: () => Promise<string>
+      checkForUpdates: () => Promise<{ updateAvailable: boolean; version: string; notes: string }>
+      downloadUpdate: () => Promise<{ success: boolean; error?: string }>
+      installUpdate: () => Promise<void>
+      onUpdateAvailable: (callback: (info: { version: string }) => void) => void
+      onUpdateDownloaded: (callback: (info: { version: string }) => void) => void
+      onScreenshotTaken: (callback: (data: { type: string; dataUrl: string; customPrompt?: string }) => void) => void
+      onAIResponse: (callback: (data: any) => void) => void
+      onSettingsUpdated: (callback: (settings: any) => void) => void
+      toggleFullscreen: () => Promise<void>
+      openSettingsFromScreenshot: () => Promise<void>
+      exitScreenshot: () => Promise<void>
+    }
+  }
+}

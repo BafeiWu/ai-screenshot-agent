@@ -1,0 +1,606 @@
+import { app, BrowserWindow, globalShortcut, ipcMain, Tray, Menu, nativeImage, screen, desktopCapturer } from 'electron'
+import path from 'path'
+import Store from 'electron-store'
+import { autoUpdater } from 'electron-updater'
+import log from 'electron-log'
+
+log.transports.file.level = 'info'
+autoUpdater.logger = log
+autoUpdater.autoDownload = false
+autoUpdater.autoInstallOnAppQuit = true
+
+const store = new Store()
+
+let mainWindow: BrowserWindow | null = null
+let panelWindow: BrowserWindow | null = null
+let settingsWindow: BrowserWindow | null = null
+let screenshotWindow: BrowserWindow | null = null
+let tray: Tray | null = null
+
+const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL
+
+function getAssetPath(...paths: string[]): string {
+  const basePath = VITE_DEV_SERVER_URL
+    ? path.join(__dirname, '..')
+    : process.resourcesPath
+  return path.join(basePath, ...paths)
+}
+
+function getAppIcon(): nativeImage {
+  const candidatePaths = VITE_DEV_SERVER_URL
+    ? [
+        path.join(__dirname, '..', 'icon.ico'),
+        path.join(__dirname, '..', 'icon.png')
+      ]
+    : [
+        path.join(process.resourcesPath, 'icon.ico'),
+        path.join(process.resourcesPath, 'icon.png'),
+        path.join(__dirname, '..', 'icon.ico'),
+        path.join(__dirname, '..', 'icon.png')
+      ]
+  for (const p of candidatePaths) {
+    const img = nativeImage.createFromPath(p)
+    if (!img.isEmpty()) {
+      console.log('Icon loaded from:', p)
+      return img
+    }
+  }
+  console.error('No icon found in any path')
+  return nativeImage.createEmpty()
+}
+
+const appIcon = nativeImage.createEmpty()
+
+function createMainWindow() {
+  if (mainWindow) return
+
+  mainWindow = new BrowserWindow({
+    width: 400,
+    height: 300,
+    show: false,
+    icon: getAppIcon(),
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  })
+
+  if (VITE_DEV_SERVER_URL) {
+    mainWindow.loadURL(VITE_DEV_SERVER_URL)
+  } else {
+    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'))
+  }
+
+  mainWindow.on('closed', () => {
+    mainWindow = null
+  })
+}
+
+function createPanelWindow() {
+  if (panelWindow) {
+    panelWindow.show()
+    return
+  }
+
+  const primaryDisplay = screen.getPrimaryDisplay()
+  const { width, height } = primaryDisplay.workAreaSize
+
+  panelWindow = new BrowserWindow({
+    width: 400,
+    height: Math.min(600, Math.floor(height * 0.7)),
+    x: width - 420,
+    y: 100,
+    frame: false,
+    transparent: false,
+    backgroundColor: '#16213e',
+    alwaysOnTop: true,
+    skipTaskbar: false,
+    resizable: true,
+    icon: getAppIcon(),
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  })
+
+  if (VITE_DEV_SERVER_URL) {
+    panelWindow.loadURL(`${VITE_DEV_SERVER_URL}#/panel`)
+  } else {
+    panelWindow.loadFile(path.join(__dirname, '../dist/index.html'), { hash: '/panel' })
+  }
+
+  panelWindow.on('closed', () => {
+    panelWindow = null
+  })
+}
+
+function createSettingsWindow() {
+  if (settingsWindow) {
+    settingsWindow.focus()
+    return
+  }
+
+  settingsWindow = new BrowserWindow({
+    width: 420,
+    height: 520,
+    resizable: false,
+    frame: false,
+    transparent: false,
+    alwaysOnTop: true,
+    icon: getAppIcon(),
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  })
+
+  settingsWindow.setAlwaysOnTop(true, 'screen-saver')
+
+  if (VITE_DEV_SERVER_URL) {
+    settingsWindow.loadURL(`${VITE_DEV_SERVER_URL}#/settings`)
+  } else {
+    settingsWindow.loadFile(path.join(__dirname, '../dist/index.html'), { hash: '/settings' })
+  }
+
+  settingsWindow.on('closed', () => {
+    settingsWindow = null
+  })
+}
+
+async function createScreenshotWindow() {
+  if (screenshotWindow) {
+    screenshotWindow.focus()
+    return
+  }
+
+  try {
+    const primaryDisplay = screen.getPrimaryDisplay()
+    const { width, height } = primaryDisplay.size
+
+    const sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: { width, height }
+    })
+
+    let screenshotImage = ''
+    if (sources.length > 0) {
+      screenshotImage = sources[0].thumbnail.toDataURL()
+    }
+
+    screenshotWindow = new BrowserWindow({
+      width: width,
+      height: height,
+      x: 0,
+      y: 0,
+      frame: false,
+      transparent: false,
+      alwaysOnTop: true,
+      fullscreen: false,
+      skipTaskbar: true,
+      resizable: false,
+      movable: false,
+      webPreferences: {
+        preload: path.join(__dirname, 'preload.js'),
+        contextIsolation: true,
+        nodeIntegration: false
+      }
+    })
+
+    screenshotWindow.focus()
+
+    if (VITE_DEV_SERVER_URL) {
+      screenshotWindow.loadURL(`${VITE_DEV_SERVER_URL}#/screenshot?image=${encodeURIComponent(screenshotImage)}`)
+    } else {
+      screenshotWindow.loadFile(path.join(__dirname, '../dist/index.html'), {
+        hash: '/screenshot',
+        query: { image: screenshotImage }
+      })
+    }
+
+    screenshotWindow.on('closed', () => {
+      screenshotWindow = null
+    })
+  } catch (error) {
+    console.error('Failed to create screenshot window:', error)
+  }
+}
+
+function formatHotkey(hk: string): string {
+  if (!hk) return ''
+  return hk
+    .replace(/CommandOrControl/gi, 'Ctrl')
+    .replace(/CmdOrCtrl/gi, 'Ctrl')
+    .replace(/Control/gi, 'Ctrl')
+    .replace(/Command/gi, 'Cmd')
+    .split('+')
+    .map(p => p.length === 1 ? p.toUpperCase() : p)
+    .join('+')
+}
+
+function buildTrayMenu() {
+  if (!tray) return
+  const screenshotHotkey = formatHotkey(store.get('screenshotHotkey', 'Alt+S') as string)
+  const fullscreenHotkey = formatHotkey(store.get('fullscreenHotkey', 'CommandOrControl+Alt+F') as string)
+  const windowHotkey = formatHotkey(store.get('windowHotkey', 'CommandOrControl+Alt+W') as string)
+
+  const contextMenu = Menu.buildFromTemplate([
+    { label: `截图 (${screenshotHotkey})`, click: () => createScreenshotWindow() },
+    { label: `全屏截图 (${fullscreenHotkey})`, click: () => takeFullscreenScreenshot() },
+    { label: `窗口截图 (${windowHotkey})`, click: () => takeWindowScreenshot() },
+    { type: 'separator' },
+    { label: '显示面板', click: () => createPanelWindow() },
+    { label: '隐藏面板', click: () => panelWindow?.hide() },
+    { type: 'separator' },
+    { label: '设置', click: () => createSettingsWindow() },
+    { type: 'separator' },
+    { label: '退出', click: () => app.quit() }
+  ])
+  tray.setContextMenu(contextMenu)
+}
+
+function createTray() {
+  try {
+    const trayIcon = getAppIcon()
+    if (trayIcon.isEmpty()) {
+      console.error('Tray icon is empty, icon file not found')
+      return
+    }
+
+    tray = new Tray(trayIcon)
+    tray.setToolTip('AI截图')
+    buildTrayMenu()
+
+    tray.on('click', () => {
+      if (panelWindow?.isVisible()) {
+        panelWindow.hide()
+      } else {
+        createPanelWindow()
+      }
+    })
+  } catch (error) {
+    console.error('Failed to create tray:', error)
+  }
+}
+
+async function takeFullscreenScreenshot() {
+  try {
+    const primaryDisplay = screen.getPrimaryDisplay()
+    const { width, height } = primaryDisplay.size
+
+    const sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: { width, height }
+    })
+
+    if (sources.length > 0) {
+      const dataUrl = sources[0].thumbnail.toDataURL()
+      panelWindow?.webContents.send('screenshot-taken', { type: 'fullscreen', dataUrl })
+      createPanelWindow()
+    }
+  } catch (error) {
+    console.error('Fullscreen screenshot failed:', error)
+  }
+}
+
+async function takeWindowScreenshot() {
+  try {
+    const sources = await desktopCapturer.getSources({
+      types: ['window'],
+      thumbnailSize: { width: 1920, height: 1080 }
+    })
+
+    if (sources.length > 0) {
+      const dataUrl = sources[0].thumbnail.toDataURL()
+      panelWindow?.webContents.send('screenshot-taken', { type: 'window', dataUrl })
+      createPanelWindow()
+    }
+  } catch (error) {
+    console.error('Window screenshot failed:', error)
+  }
+}
+
+function registerShortcuts() {
+  try {
+    const screenshotHotkey = store.get('screenshotHotkey', 'Alt+S') as string
+    const fullscreenHotkey = store.get('fullscreenHotkey', 'CommandOrControl+Alt+F') as string
+    const windowHotkey = store.get('windowHotkey', 'CommandOrControl+Alt+W') as string
+
+    globalShortcut.unregisterAll()
+
+    const registered1 = globalShortcut.register(screenshotHotkey, () => {
+      console.log('Screenshot shortcut triggered')
+      createScreenshotWindow()
+    })
+
+    const registered2 = globalShortcut.register(fullscreenHotkey, () => {
+      takeFullscreenScreenshot()
+    })
+
+    const registered3 = globalShortcut.register(windowHotkey, () => {
+      takeWindowScreenshot()
+    })
+
+    console.log('Shortcuts registered:', registered1, registered2, registered3)
+  } catch (error) {
+    console.error('Failed to register shortcuts:', error)
+  }
+}
+
+function setupIPC() {
+  ipcMain.handle('get-screenshot', async (_, type: 'region' | 'fullscreen' | 'window') => {
+    const sources = await desktopCapturer.getSources({
+      types: type === 'window' ? ['window'] : ['screen'],
+      thumbnailSize: type === 'fullscreen' ? screen.getPrimaryDisplay().size : { width: 1920, height: 1080 }
+    })
+
+    if (sources.length > 0) {
+      return sources[0].thumbnail.toDataURL()
+    }
+    return null
+  })
+
+  ipcMain.handle('send-to-panel', (_, data: any) => {
+    panelWindow?.webContents.send('ai-response', data)
+  })
+
+  ipcMain.handle('hide-panel', () => {
+    panelWindow?.hide()
+  })
+
+  ipcMain.handle('minimize-panel', () => {
+    panelWindow?.minimize()
+  })
+
+  ipcMain.handle('resize-panel', (_, width: number, height: number) => {
+    if (panelWindow) {
+      const minWidth = 300
+      const minHeight = 400
+      panelWindow.setSize(
+        Math.max(minWidth, Math.round(width)),
+        Math.max(minHeight, Math.round(height))
+      )
+    }
+  })
+
+  ipcMain.handle('show-panel', () => {
+    createPanelWindow()
+  })
+
+  ipcMain.handle('get-settings', () => {
+    return {
+      screenshotHotkey: store.get('screenshotHotkey', 'Alt+S'),
+      fullscreenHotkey: store.get('fullscreenHotkey', 'CommandOrControl+Alt+F'),
+      windowHotkey: store.get('windowHotkey', 'CommandOrControl+Alt+W'),
+      autoStart: store.get('autoStart', false),
+      panelOpacity: store.get('panelOpacity', 0.95),
+      apiKey: store.get('apiKey', ''),
+      apiModel: store.get('apiModel', 'doubao-vision-pro'),
+      apiBaseUrl: store.get('apiBaseUrl', 'https://ark.cn-beijing.volces.com/api/v3')
+    }
+  })
+
+  ipcMain.handle('save-settings', (_, settings: any) => {
+    console.log('save-settings called with:', settings)
+    try {
+      Object.keys(settings).forEach(key => {
+        console.log(`Setting ${key}:`, settings[key])
+        store.set(key, settings[key])
+      })
+
+      if (settings.panelOpacity !== undefined && panelWindow) {
+        panelWindow.setOpacity(settings.panelOpacity)
+      }
+
+      registerShortcuts()
+      buildTrayMenu()
+
+      panelWindow?.webContents.send('settings-updated', settings)
+
+      console.log('save-settings success')
+      return { success: true }
+    } catch (error) {
+      console.error('Save settings error:', error)
+      return { success: false, error: String(error) }
+    }
+  })
+
+  ipcMain.handle('get-history', () => {
+    return store.get('history', [])
+  })
+
+  ipcMain.handle('save-history', (_, history: any[]) => {
+    store.set('history', history)
+    return true
+  })
+
+  ipcMain.handle('get-api-key', () => {
+    return store.get('apiKey', '')
+  })
+
+  ipcMain.handle('get-version', () => {
+    return app.getVersion()
+  })
+
+  ipcMain.handle('check-for-updates', async () => {
+    try {
+      if (VITE_DEV_SERVER_URL) {
+        log.info('Update check skipped in dev mode')
+        return { updateAvailable: false, version: app.getVersion(), notes: '' }
+      }
+      const result = await autoUpdater.checkForUpdates()
+      if (result && result.updateInfo) {
+        return {
+          updateAvailable: true,
+          version: result.updateInfo.version,
+          notes: result.updateInfo.releaseNotes || ''
+        }
+      }
+      return { updateAvailable: false, version: app.getVersion(), notes: '' }
+    } catch (error) {
+      log.error('Update check failed:', error)
+      return { updateAvailable: false, version: app.getVersion(), notes: '' }
+    }
+  })
+
+  ipcMain.handle('download-update', async () => {
+    try {
+      if (VITE_DEV_SERVER_URL) {
+        return { success: false, error: 'Cannot download in dev mode' }
+      }
+      await autoUpdater.downloadUpdate()
+      return { success: true }
+    } catch (error) {
+      log.error('Download update failed:', error)
+      return { success: false, error: String(error) }
+    }
+  })
+
+  ipcMain.handle('install-update', () => {
+    if (!VITE_DEV_SERVER_URL) {
+      autoUpdater.quitAndInstall()
+    }
+  })
+
+  ipcMain.handle('open-settings', () => {
+    createSettingsWindow()
+    if (settingsWindow) {
+      settingsWindow.setAlwaysOnTop(true, 'screen-saver')
+      settingsWindow.show()
+      settingsWindow.focus()
+    }
+  })
+
+  ipcMain.handle('close-settings', () => {
+    settingsWindow?.close()
+  })
+
+  ipcMain.handle('close-screenshot', () => {
+    screenshotWindow?.close()
+  })
+
+  ipcMain.handle('exit-screenshot', () => {
+    if (screenshotWindow) {
+      screenshotWindow.close()
+      screenshotWindow = null
+    }
+  })
+
+  ipcMain.handle('open-settings-from-screenshot', () => {
+    if (screenshotWindow) {
+      screenshotWindow.hide()
+    }
+    createSettingsWindow()
+    if (settingsWindow) {
+      settingsWindow.setAlwaysOnTop(true, 'screen-saver')
+      settingsWindow.focus()
+    }
+  })
+
+  let originalPanelBounds = { x: 0, y: 100, width: 400, height: 600 }
+  let isInCustomFullscreen = false
+
+  ipcMain.handle('toggle-fullscreen', () => {
+    if (panelWindow) {
+      if (isInCustomFullscreen) {
+        isInCustomFullscreen = false
+        panelWindow.setFullScreen(false)
+        panelWindow.setPosition(originalPanelBounds.x, originalPanelBounds.y)
+        panelWindow.setSize(originalPanelBounds.width, originalPanelBounds.height)
+      } else {
+        originalPanelBounds = {
+          x: panelWindow.getPosition()[0],
+          y: panelWindow.getPosition()[1],
+          width: panelWindow.getSize()[0],
+          height: panelWindow.getSize()[1]
+        }
+        const primaryDisplay = screen.getPrimaryDisplay()
+        const { width, height } = primaryDisplay.size
+        panelWindow.setSize(width, height)
+        panelWindow.setPosition(0, 0)
+        panelWindow.setFullScreen(true)
+        isInCustomFullscreen = true
+      }
+    }
+  })
+
+  ipcMain.handle('screenshot-cropped', (_, croppedImageData: string, customPrompt?: string) => {
+    screenshotWindow?.close()
+    createPanelWindow()
+    panelWindow?.webContents.send('screenshot-taken', { type: 'cropped', dataUrl: croppedImageData, customPrompt })
+    panelWindow?.show()
+    panelWindow?.focus()
+  })
+
+  ipcMain.handle('move-panel', (_, x: number, y: number) => {
+    if (panelWindow) {
+      panelWindow.setPosition(Math.round(x), Math.round(y))
+    }
+  })
+
+  ipcMain.handle('get-panel-position', () => {
+    if (panelWindow) {
+      return panelWindow.getPosition()
+    }
+    return [0, 0]
+  })
+}
+
+app.whenReady().then(() => {
+  console.log('App ready, initializing...')
+  createMainWindow()
+  createPanelWindow()
+  createTray()
+  setupIPC()
+  registerShortcuts()
+
+  if (!VITE_DEV_SERVER_URL) {
+    autoUpdater.on('update-available', (info) => {
+      log.info('Update available:', info.version)
+      if (settingsWindow) {
+        settingsWindow.webContents.send('update-available', info)
+      }
+      if (panelWindow) {
+        panelWindow.webContents.send('update-available', info)
+      }
+    })
+
+    autoUpdater.on('update-downloaded', (info) => {
+      log.info('Update downloaded:', info.version)
+      if (settingsWindow) {
+        settingsWindow.webContents.send('update-downloaded', info)
+      }
+      if (panelWindow) {
+        panelWindow.webContents.send('update-downloaded', info)
+      }
+    })
+
+    autoUpdater.on('error', (error) => {
+      log.error('AutoUpdater error:', error)
+    })
+
+    autoUpdater.checkForUpdates().catch((err) => {
+      log.error('Initial update check failed:', err)
+    })
+  }
+
+  console.log('Initialization complete')
+})
+
+app.on('activate', () => {
+  if (BrowserWindow.getAllWindows().length === 0) {
+    createMainWindow()
+  }
+})
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') {
+    app.quit()
+  }
+})
+
+app.on('will-quit', () => {
+  globalShortcut.unregisterAll()
+})
