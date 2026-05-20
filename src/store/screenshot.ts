@@ -10,9 +10,14 @@ export const useScreenshotStore = defineStore('screenshot', () => {
   const currentImage = ref<string | null>(null)
   const apiKey = ref<string>('')
   const conversationId = ref<string>('')
+  const favorites = ref<Array<{ id: string; title: string; timestamp: number; imageData: string; question: string; answer: string; messages?: Array<{ role: string; content: string; image?: string }> }>>([])
 
   const setCurrentImage = (image: string | null) => {
     currentImage.value = image
+  }
+
+  const setFavorites = (data: Array<{ id: string; title: string; timestamp: number; imageData: string; question: string; answer: string; messages?: Array<{ role: string; content: string; image?: string }> }>) => {
+    favorites.value = data
   }
 
   const sendToAI = async (
@@ -22,10 +27,6 @@ export const useScreenshotStore = defineStore('screenshot', () => {
     onToken?: (token: string) => void
   ): Promise<string> => {
     const image = imageData || currentImage.value
-
-    if (!image) {
-      throw new Error('No image available')
-    }
 
     let apiKeyValue = apiKey.value
     let apiModel = 'doubao-vision-pro'
@@ -47,18 +48,26 @@ export const useScreenshotStore = defineStore('screenshot', () => {
       return '请先在设置中配置豆包 API Key'
     }
 
-    const messages: Array<{
-      role: string
-      content: Array<{ type: string; image_url?: { url: string } | string; text?: string }>
-    }> = [
-      {
-        role: 'user',
-        content: [
-          { type: 'image_url', image_url: image },
-          { type: 'text', text: userMessage }
-        ]
-      }
-    ]
+    let messages: Array<any>
+    
+    if (image) {
+      messages = [
+        {
+          role: 'user',
+          content: [
+            { type: 'image_url', image_url: image },
+            { type: 'text', text: userMessage }
+          ]
+        }
+      ]
+    } else {
+      messages = [
+        {
+          role: 'user',
+          content: userMessage
+        }
+      ]
+    }
 
     try {
       const endpoint = apiBaseUrl.endsWith('/') ? apiBaseUrl + 'chat/completions' : apiBaseUrl + '/chat/completions'
@@ -66,7 +75,7 @@ export const useScreenshotStore = defineStore('screenshot', () => {
         endpoint,
         apiKeyValue: apiKeyValue ? apiKeyValue.substring(0, 10) + '...' : 'empty',
         apiModel,
-        imageLength: image.length
+        imageLength: image ? image.length : 0
       })
 
       const response = await fetch(endpoint, {
@@ -139,7 +148,9 @@ export const useScreenshotStore = defineStore('screenshot', () => {
     currentImage,
     apiKey,
     conversationId,
+    favorites,
     setCurrentImage,
+    setFavorites,
     sendToAI,
     setApiKey
   }
@@ -171,6 +182,8 @@ declare global {
       installUpdate: () => Promise<void>
       onUpdateAvailable: (callback: (info: { version: string }) => void) => void
       onUpdateDownloaded: (callback: (info: { version: string }) => void) => void
+      getFavorites: () => Promise<any[]>
+      saveFavorites: (favorites: any[]) => Promise<boolean>
       onScreenshotTaken: (callback: (data: { type: string; dataUrl: string; customPrompt?: string }) => void) => void
       onAIResponse: (callback: (data: any) => void) => void
       onSettingsUpdated: (callback: (settings: any) => void) => void

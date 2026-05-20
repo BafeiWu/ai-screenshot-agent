@@ -29,6 +29,7 @@ const tool = ref<Tool>('pen')
 const color = ref('#ff3b30')
 const strokeWidth = ref(4)
 const customPrompt = ref('')
+const newChat = ref(false)
 
 const PRESET_COLORS = ['#ff3b30', '#ff9500', '#ffcc00', '#34c759', '#0a84ff', '#ffffff', '#000000']
 const WIDTHS = [2, 4, 7]
@@ -127,7 +128,7 @@ const draw = () => {
     if (drawingAnnotation.value) drawAnnotation(ctx, drawingAnnotation.value)
     ctx.restore()
 
-    ctx.strokeStyle = '#1e90ff'
+    ctx.strokeStyle = '#c86b7d'
     ctx.lineWidth = 1.5
     ctx.strokeRect(s.x + 0.5, s.y + 0.5, s.width - 1, s.height - 1)
 
@@ -139,7 +140,7 @@ const draw = () => {
     ]
     for (const [hx, hy] of handles) {
       ctx.fillStyle = '#fff'
-      ctx.strokeStyle = '#1e90ff'
+      ctx.strokeStyle = '#c86b7d'
       ctx.lineWidth = 1
       ctx.beginPath()
       ctx.rect(hx - 3.5, hy - 3.5, 7, 7)
@@ -154,7 +155,7 @@ const draw = () => {
     let lx = s.x
     let ly = s.y - th - 4
     if (ly < 4) ly = s.y + 4
-    ctx.fillStyle = 'rgba(30, 144, 255, 0.95)'
+    ctx.fillStyle = 'rgba(200, 107, 125, 0.95)'
     ctx.fillRect(lx, ly, tw, th)
     ctx.fillStyle = '#fff'
     ctx.textBaseline = 'middle'
@@ -164,7 +165,7 @@ const draw = () => {
     ctx.fillRect(0, 0, canvas.width, canvas.height)
 
     if (hovering.value && mode.value === 'select') {
-      ctx.strokeStyle = 'rgba(30, 144, 255, 0.55)'
+      ctx.strokeStyle = '#c86b7d'
       ctx.lineWidth = 1
       ctx.setLineDash([5, 4])
       ctx.beginPath()
@@ -299,6 +300,9 @@ const confirmSelection = async () => {
 
   const dataUrl = out.toDataURL('image/png')
   const prompt = customPrompt.value.trim() || '解析截图内容，回答截图相关问题，提取关键信息'
+  
+  localStorage.setItem('newChat', newChat.value ? 'true' : 'false')
+  
   await window.electronAPI.screenshotCropped(dataUrl, prompt)
 }
 
@@ -325,6 +329,7 @@ const onKeyDown = (e: KeyboardEvent) => {
 }
 
 onMounted(() => {
+  newChat.value = false
   const params = new URLSearchParams(window.location.search)
   const imageData = params.get('image')
   if (imageData) {
@@ -448,6 +453,10 @@ onUnmounted(() => {
         />
       </div>
       <div class="toolbar-actions">
+        <label class="new-chat-checkbox">
+          <input type="checkbox" v-model="newChat" />
+          <span>New Chat</span>
+        </label>
         <button class="btn-settings" @click="openSettings" title="设置">
           <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
             <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.8"/>
@@ -532,7 +541,7 @@ onUnmounted(() => {
 }
 
 .tool-btn.active {
-  background: #1e90ff;
+  background: #c86b7d;
   color: #fff;
 }
 
@@ -660,6 +669,25 @@ onUnmounted(() => {
   gap: 8px;
 }
 
+.new-chat-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: #ccc;
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.new-chat-checkbox input {
+  cursor: pointer;
+  accent-color: #c86b7d;
+}
+
+.new-chat-checkbox span {
+  white-space: nowrap;
+}
+
 .btn-settings {
   display: inline-flex;
   align-items: center;
@@ -700,7 +728,7 @@ onUnmounted(() => {
 }
 
 .btn-confirm {
-  background: #1e90ff;
+  background: #c86b7d;
   border: none;
   color: #fff;
   padding: 7px 16px;
@@ -711,7 +739,7 @@ onUnmounted(() => {
 }
 
 .btn-confirm:hover:not(:disabled) {
-  background: #0a7fee;
+  background: #b85a6b;
 }
 
 .btn-confirm:disabled {

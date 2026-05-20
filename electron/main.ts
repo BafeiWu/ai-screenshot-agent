@@ -416,6 +416,18 @@ function setupIPC() {
     return true
   })
 
+  ipcMain.handle('get-favorites', () => {
+    const data = store.get('favorites', [])
+    console.log('[Main] get-favorites:', data)
+    return data
+  })
+
+  ipcMain.handle('save-favorites', (_, favorites: any[]) => {
+    console.log('[Main] save-favorites:', favorites)
+    store.set('favorites', favorites)
+    return true
+  })
+
   ipcMain.handle('get-api-key', () => {
     return store.get('apiKey', '')
   })

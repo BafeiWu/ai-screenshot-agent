@@ -91,5 +91,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   onSettingsUpdated: (callback: (settings: any) => void) => {
     ipcRenderer.on('settings-updated', (_, settings) => callback(settings))
-  }
+  },
+
+  getFavorites: () =>
+    ipcRenderer.invoke('get-favorites'),
+
+  saveFavorites: (favorites: any[]) =>
+    ipcRenderer.invoke('save-favorites', favorites)
 })

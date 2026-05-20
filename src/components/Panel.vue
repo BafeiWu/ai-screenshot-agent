@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, nextTick, computed } from 'vue'
 import { useScreenshotStore } from '../store/screenshot'
 
 const store = useScreenshotStore()
@@ -16,7 +16,199 @@ const windowStartY = ref(0)
 const showHistory = ref(false)
 const isFullscreen = ref(false)
 const screenshotHotkey = ref('Alt+S')
-const history = ref<Array<{ id: string; timestamp: number; imageData: string; question: string; answer: string }>>([])
+const history = ref<Array<{ id: string; timestamp: number; imageData: string; question: string; answer: string; messages?: Array<{ role: string; content: string; image?: string }> }>>([])
+const currentHistoryId = ref<string | null>(null)
+
+const showFavorites = ref(false)
+const showFavoriteDialog = ref(false)
+const favoriteTitle = ref('')
+const currentFavoriteId = ref<string | null>(null)
+
+const favorites = computed(() => store.favorites)
+
+const isCurrentFavorited = computed(() => {
+  return currentFavoriteId.value !== null
+})
+const favoriteSearch = ref('')
+const currentFavorite = ref<{ imageData: string; question: string; answer: string } | null>(null)
+const editingFavoriteId = ref<string | null>(null)
+const editingTitle = ref('')
+let clickTimer: ReturnType<typeof setTimeout> | null = null
+
+const handleTitleClick = (item: { id: string; imageData: string; question: string; answer: string }, event: MouseEvent) => {
+  event.stopPropagation()
+  if (editingFavoriteId.value === item.id) return
+  
+  if (clickTimer) {
+    clearTimeout(clickTimer)
+    clickTimer = null
+  }
+  clickTimer = setTimeout(() => {
+    viewFavorite(item)
+    clickTimer = null
+  }, 300)
+}
+
+const startEditTitle = (item: { id: string; title: string }, event: MouseEvent) => {
+  event.stopPropagation()
+  if (clickTimer) {
+    clearTimeout(clickTimer)
+    clickTimer = null
+  }
+  editingFavoriteId.value = item.id
+  editingTitle.value = item.title
+}
+
+const saveEditTitle = () => {
+  if (editingFavoriteId.value && editingTitle.value.trim()) {
+    const updated = favorites.value.map(f => 
+      f.id === editingFavoriteId.value ? { ...f, title: editingTitle.value.trim() } : f
+    )
+    store.setFavorites(updated)
+    saveFavorites()
+  }
+  editingFavoriteId.value = null
+  editingTitle.value = ''
+}
+
+const cancelEditTitle = () => {
+  editingFavoriteId.value = null
+  editingTitle.value = ''
+}
+
+const handleGlobalClick = (event: MouseEvent) => {
+  if (editingFavoriteId.value) {
+    const target = event.target as HTMLElement
+    if (!target.closest('.edit-title-input') && !target.closest('.history-question')) {
+      cancelEditTitle()
+    }
+  }
+}
+
+const filteredFavorites = computed(() => {
+  if (!favoriteSearch.value.trim()) return favorites.value
+  const keyword = favoriteSearch.value.toLowerCase()
+  return favorites.value.filter(f => f.title.toLowerCase().includes(keyword))
+})
+
+const loadFavorites = async () => {
+  try {
+    console.log('Loading favorites...')
+    const data = await window.electronAPI.getFavorites()
+    console.log('Favorites loaded:', data)
+    store.setFavorites(data || [])
+  } catch (e) {
+    console.error('Failed to load favorites:', e)
+  }
+}
+
+const saveFavorites = async () => {
+  try {
+    const raw = JSON.parse(JSON.stringify(store.favorites))
+    console.log('[Renderer] saveFavorites called, data:', raw)
+    await window.electronAPI.saveFavorites(raw)
+    console.log('[Renderer] saveFavorites completed')
+  } catch (e) {
+    console.error('[Renderer] saveFavorites error:', e)
+  }
+}
+
+const toggleFavorite = () => {
+  console.log('[toggleFavorite] called, isCurrentFavorited:', isCurrentFavorited.value, 'currentFavoriteId:', currentFavoriteId.value)
+  
+  if (isCurrentFavorited.value) {
+    console.log('[toggleFavorite] removing favorite')
+    if (currentFavoriteId.value) {
+      const newFavorites = favorites.value.filter(f => f.id !== currentFavoriteId.value)
+      store.setFavorites(newFavorites)
+      saveFavorites()
+      currentFavoriteId.value = null
+      console.log('[toggleFavorite] favorite removed')
+    }
+    return
+  }
+  
+  console.log('[toggleFavorite] showing favorite dialog')
+  favoriteTitle.value = ''
+  showFavoriteDialog.value = true
+}
+
+const confirmFavorite = async () => {
+  if (!favoriteTitle.value.trim()) return
+  console.log('Confirming favorite...')
+  const lastUserMsg = messages.value.find(m => m.role === 'user')
+  const lastAssistantMsg = messages.value.find(m => m.role === 'assistant')
+  const lastImage = lastUserMsg?.image || store.currentImage
+  
+  if (currentFavoriteId.value) {
+    const existingIndex = favorites.value.findIndex(f => f.id === currentFavoriteId.value)
+    if (existingIndex !== -1) {
+      const updatedFavorite = {
+        ...favorites.value[existingIndex],
+        timestamp: Date.now(),
+        question: lastUserMsg?.content || '',
+        answer: lastAssistantMsg?.content || '',
+        messages: JSON.parse(JSON.stringify(messages.value))
+      }
+      const newFavorites = [...favorites.value]
+      newFavorites[existingIndex] = updatedFavorite
+      store.setFavorites(newFavorites)
+      await saveFavorites()
+      showFavoriteDialog.value = false
+      favoriteTitle.value = ''
+      return
+    }
+  }
+  
+  const newFavorite = {
+    id: Date.now().toString(),
+    title: favoriteTitle.value.trim(),
+    timestamp: Date.now(),
+    imageData: lastImage || '',
+    question: lastUserMsg?.content || '',
+    answer: lastAssistantMsg?.content || '',
+    messages: JSON.parse(JSON.stringify(messages.value))
+  }
+  const newFavorites = [newFavorite, ...favorites.value]
+  store.setFavorites(newFavorites)
+  console.log('Saving favorites with new item:', newFavorites)
+  await saveFavorites()
+  console.log('Favorite saved!')
+  currentFavoriteId.value = newFavorite.id
+  showFavoriteDialog.value = false
+  favoriteTitle.value = ''
+}
+
+const viewFavorite = (fav: { id: string; imageData: string; question: string; answer: string; messages?: Array<{ role: string; content: string; image?: string }> }) => {
+  console.log('[viewFavorite] called, fav.id:', fav.id)
+  console.log('[viewFavorite] fav.messages:', fav.messages)
+  store.setCurrentImage(fav.imageData)
+  if (fav.messages && fav.messages.length > 0) {
+    messages.value = JSON.parse(JSON.stringify(fav.messages))
+    console.log('[viewFavorite] loaded from messages, count:', fav.messages.length)
+  } else if (fav.question || fav.answer) {
+    messages.value = [
+      { role: 'user', content: fav.question, image: fav.imageData },
+      { role: 'assistant', content: fav.answer }
+    ]
+    console.log('[viewFavorite] loaded from question/answer')
+  } else {
+    messages.value = []
+    console.log('[viewFavorite] loaded empty (no messages, no question/answer)')
+  }
+  currentFavoriteId.value = fav.id
+  console.log('[viewFavorite] currentFavoriteId set to:', currentFavoriteId.value)
+  showFavorites.value = false
+}
+
+const deleteFavorite = (id: string) => {
+  store.setFavorites(favorites.value.filter(f => f.id !== id))
+  saveFavorites()
+}
+
+const backToChat = () => {
+  currentFavorite.value = null
+}
 
 const formatHotkey = (hk: string): string => {
   if (!hk) return ''
@@ -43,6 +235,7 @@ interface ScreenshotRecord {
   imageData: string
   question: string
   answer: string
+  messages?: Array<{ role: string; content: string; image?: string }>
 }
 
 const handleDragStart = async (e: MouseEvent) => {
@@ -202,14 +395,30 @@ const saveToHistory = async () => {
     const lastUserMsg = messages.value[messages.value.length - 2]
     const lastAImsg = messages.value[messages.value.length - 1]
     if (lastUserMsg.role === 'user' && lastAImsg.role === 'assistant') {
-      const record: ScreenshotRecord = {
-        id: Date.now().toString(),
-        timestamp: Date.now(),
-        imageData: store.currentImage || '',
-        question: lastUserMsg.content,
-        answer: lastAImsg.content
+      if (currentHistoryId.value) {
+        const existingIndex = hist.findIndex(h => h.id === currentHistoryId.value)
+        if (existingIndex !== -1) {
+          hist[existingIndex] = {
+            ...hist[existingIndex],
+            timestamp: Date.now(),
+            question: lastUserMsg.content,
+            answer: lastAImsg.content,
+            imageData: lastUserMsg.image || hist[existingIndex].imageData,
+            messages: JSON.parse(JSON.stringify(messages.value))
+          }
+        }
+      } else {
+        const record: ScreenshotRecord = {
+          id: Date.now().toString(),
+          timestamp: Date.now(),
+          imageData: lastUserMsg.image || '',
+          question: lastUserMsg.content,
+          answer: lastAImsg.content,
+          messages: JSON.parse(JSON.stringify(messages.value))
+        }
+        hist.push(record)
+        currentHistoryId.value = record.id
       }
-      hist.push(record)
       await window.electronAPI.saveHistory(hist)
     }
   }
@@ -228,9 +437,18 @@ const openSettings = () => {
   window.electronAPI.openSettings()
 }
 
-const clearChat = () => {
+const clearChat = async () => {
+  console.log('[clearChat] called, isCurrentFavorited:', isCurrentFavorited.value, 'currentFavoriteId:', currentFavoriteId.value)
   messages.value = []
   store.setCurrentImage('')
+  if (isCurrentFavorited.value && currentFavoriteId.value) {
+    console.log('[clearChat] deleting favorite:', currentFavoriteId.value)
+    const newFavorites = favorites.value.filter(f => f.id !== currentFavoriteId.value)
+    store.setFavorites(newFavorites)
+    await saveFavorites()
+    currentFavoriteId.value = null
+    console.log('[clearChat] favorite deleted')
+  }
 }
 
 const toggleFullscreen = () => {
@@ -272,9 +490,42 @@ const formatText = (text: string): string => {
 }
 
 const toggleHistory = async () => {
-  showHistory.value = !showHistory.value
   if (showHistory.value) {
+    showHistory.value = false
+  } else {
+    showHistory.value = true
+    showFavorites.value = false
     history.value = await window.electronAPI.getHistory() as ScreenshotRecord[]
+  }
+}
+
+const toggleFavorites = async () => {
+  if (showFavorites.value) {
+    showFavorites.value = false
+  } else {
+    if (isCurrentFavorited.value && messages.value.length > 0) {
+      const lastUserMsg = messages.value.find(m => m.role === 'user')
+      const lastAssistantMsg = messages.value.find(m => m.role === 'assistant')
+      const favToUpdate = favorites.value.find(f => f.id === currentFavoriteId.value)
+      if (favToUpdate && lastUserMsg && lastAssistantMsg) {
+        const updatedFavorite = {
+          ...favToUpdate,
+          timestamp: Date.now(),
+          question: lastUserMsg.content || '',
+          answer: lastAssistantMsg.content || '',
+          messages: JSON.parse(JSON.stringify(messages.value))
+        }
+        const newFavorites = favorites.value.map(f => f.id === favToUpdate.id ? updatedFavorite : f)
+        store.setFavorites(newFavorites)
+        await saveFavorites()
+      }
+    }
+    showFavorites.value = true
+    showHistory.value = false
+    currentFavorite.value = null
+    favoriteSearch.value = ''
+    const data = await window.electronAPI.getFavorites()
+    store.setFavorites(data || [])
   }
 }
 
@@ -287,10 +538,18 @@ const clearHistory = async () => {
 
 const loadFromHistory = (item: ScreenshotRecord) => {
   store.setCurrentImage(item.imageData)
-  messages.value = [
-    { role: 'user', content: item.question },
-    { role: 'assistant', content: item.answer }
-  ]
+  if (item.messages && item.messages.length > 0) {
+    messages.value = JSON.parse(JSON.stringify(item.messages))
+  } else if (item.question || item.answer) {
+    messages.value = [
+      { role: 'user', content: item.question, image: item.imageData },
+      { role: 'assistant', content: item.answer }
+    ]
+  } else {
+    messages.value = []
+  }
+  currentHistoryId.value = item.id
+  currentFavoriteId.value = null
   showHistory.value = false
 }
 
@@ -317,21 +576,40 @@ const handlePanelKeyDown = (e: KeyboardEvent) => {
 
 onMounted(async () => {
   window.addEventListener('keydown', handlePanelKeyDown)
+  window.addEventListener('click', handleGlobalClick)
   await loadHotkeyFromSettings()
+  await loadFavorites()
   window.electronAPI.onSettingsUpdated((s) => {
     if (s?.screenshotHotkey) screenshotHotkey.value = s.screenshotHotkey
   })
   window.electronAPI.onScreenshotTaken(async (data) => {
+    const newChat = localStorage.getItem('newChat') === 'true'
+    localStorage.removeItem('newChat')
+    
+    console.log('[onScreenshotTaken] newChat:', newChat, 'currentFavoriteId before:', currentFavoriteId.value)
     store.setCurrentImage(data.dataUrl)
-    messages.value = []
+    if (newChat) {
+      currentFavoriteId.value = null
+      currentHistoryId.value = null
+    }
+    console.log('[onScreenshotTaken] currentFavoriteId after:', currentFavoriteId.value)
+    showFavorites.value = false
+    showHistory.value = false
+    
+    if (newChat) {
+      messages.value = []
+    }
+    
     isLoading.value = true
     isStreaming.value = false
 
     const prompt = data.customPrompt || '解析截图内容，回答截图相关问题，提取关键信息'
     const userQuestion = data.customPrompt ? data.customPrompt : '解析截图内容'
 
-    messages.value.push({ role: 'user', content: userQuestion })
+    console.log('Screenshot taken, newChat:', newChat, 'messages before:', messages.value.length)
+    messages.value.push({ role: 'user', content: userQuestion, image: data.dataUrl })
     messages.value.push({ role: 'assistant', content: '' })
+    console.log('Messages after push:', messages.value.length)
     const msgIndex = messages.value.length - 1
     scrollToBottom()
 
@@ -363,6 +641,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   window.removeEventListener('keydown', handlePanelKeyDown)
+  window.removeEventListener('click', handleGlobalClick)
 })
 </script>
 
@@ -400,7 +679,10 @@ onUnmounted(() => {
             <path d="M12 7v5l3 2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
         </button>
-        <button class="btn-icon" @click="clearChat" title="清空当前对话">
+        <button class="btn-icon" @click="toggleFavorites" :class="{ active: showFavorites }" title="收藏">
+          <img src="/favorite.png" alt="收藏" class="btn-icon-img" />
+        </button>
+        <button class="btn-icon" @click="clearChat" title="删除此条会话">
           <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
             <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
             <path d="M10 11v6M14 11v6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
@@ -462,11 +744,84 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <template v-else>
-        <div v-if="store.currentImage" class="image-preview">
-          <img :src="store.currentImage" alt="截图预览" />
+      <div v-else-if="showFavorites && !currentFavorite" class="history-view">
+        <div class="history-header favorites-header">
+          <button class="back-btn" @click="showFavorites = false">
+            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M19 12H5M12 19l-7-7 7-7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+          <span class="favorites-title">我的收藏</span>
         </div>
+        <div class="favorites-search">
+          <input
+            v-model="favoriteSearch"
+            type="text"
+            placeholder="搜索收藏标题..."
+          />
+        </div>
+        <div v-if="filteredFavorites.length === 0" class="history-empty">
+          暂无收藏
+        </div>
+        <div v-else class="history-list">
+          <div
+            v-for="item in filteredFavorites"
+            :key="item.id"
+            class="history-item"
+            @click="viewFavorite(item)"
+          >
+            <div class="history-thumb">
+              <img v-if="item.imageData" :src="item.imageData" alt="截图" />
+            </div>
+            <div class="history-info">
+              <div class="history-question" @click="handleTitleClick(item, $event)" @dblclick="startEditTitle(item, $event)">
+                <template v-if="editingFavoriteId === item.id">
+                  <input 
+                    v-model="editingTitle" 
+                    class="edit-title-input"
+                    @blur="saveEditTitle"
+                    @keyup.enter="saveEditTitle"
+                    @keyup.escape="cancelEditTitle"
+                    @click.stop
+                    autofocus
+                  />
+                </template>
+                <template v-else>{{ item.title }}</template>
+              </div>
+              <div class="history-time">{{ formatTime(item.timestamp) }}</div>
+            </div>
+            <button class="delete-btn" @click.stop="deleteFavorite(item.id)" title="删除">
+              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+      </div>
 
+      <div v-else-if="currentFavorite" class="history-view">
+        <div class="history-header">
+          <button class="back-btn" @click="backToChat">
+            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M19 12H5M12 19l-7-7 7-7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+          <span>{{ currentFavorite.question || '收藏详情' }}</span>
+        </div>
+        <div class="favorite-detail">
+          <div v-if="currentFavorite.imageData" class="detail-image">
+            <img :src="currentFavorite.imageData" alt="截图" />
+          </div>
+          <div class="detail-content">
+            <div class="detail-label">问题：</div>
+            <div class="detail-text">{{ currentFavorite.question }}</div>
+            <div class="detail-label">回答：</div>
+            <div class="detail-text">{{ currentFavorite.answer }}</div>
+          </div>
+        </div>
+      </div>
+
+      <template v-else>
         <div v-if="messages.length === 0 && !isLoading" class="empty-state">
           <div class="empty-icon">📸</div>
           <p>按下 <kbd>{{ formatHotkey(screenshotHotkey) }}</kbd> 截图</p>
@@ -483,7 +838,9 @@ onUnmounted(() => {
             <div class="message-avatar">
               {{ msg.role === 'user' ? '👤' : '🤖' }}
             </div>
-            <div class="message-content" v-if="msg.role === 'user'" v-html="msg.content">
+            <div class="message-content" v-if="msg.role === 'user'">
+              <img v-if="msg.image" :src="msg.image" class="message-image" />
+              <div v-if="msg.content" v-html="msg.content"></div>
             </div>
             <div class="message-content" v-else-if="!msg.content && isLoading">
               <div class="typing-indicator">
@@ -517,16 +874,42 @@ onUnmounted(() => {
         v-model="inputText"
         type="text"
         placeholder="继续追问..."
-        :disabled="isLoading || showHistory"
+        :disabled="isLoading || showHistory || showFavorites"
         @keyup.enter="sendMessage"
       />
-      <button @click="sendMessage" :disabled="isLoading || !inputText.trim() || showHistory">
+      <button class="btn-favorite" @click="toggleFavorite" :disabled="showHistory || showFavorites" :title="isCurrentFavorited ? '取消收藏' : '收藏'">
+        <img v-if="isCurrentFavorited" src="/favorited.png" alt="已收藏" />
+        <img v-else src="/favorite.png" alt="收藏" />
+      </button>
+      <button @click="sendMessage" :disabled="isLoading || !inputText.trim() || showHistory || showFavorites">
         发送
       </button>
     </div>
 
     <div class="resize-handle top-right" @mousedown="startResize('top-right', $event)"></div>
     <div class="resize-handle bottom-right" @mousedown="startResize('bottom-right', $event)"></div>
+
+    <div v-if="showFavoriteDialog" class="dialog-overlay" @click.self="showFavoriteDialog = false">
+      <div class="dialog">
+        <div class="dialog-header">
+          <img src="/favorite.png" alt="收藏" class="dialog-icon-img" />
+          <span>收藏此对话</span>
+        </div>
+        <div class="dialog-body">
+          <input
+            v-model="favoriteTitle"
+            type="text"
+            placeholder="请输入收藏标题..."
+            @keyup.enter="confirmFavorite"
+            autofocus
+          />
+        </div>
+        <div class="dialog-footer">
+          <button class="btn-cancel" @click="showFavoriteDialog = false">取消</button>
+          <button class="btn-confirm" @click="confirmFavorite" :disabled="!favoriteTitle.trim()">确认收藏</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -604,14 +987,19 @@ onUnmounted(() => {
   height: 16px;
 }
 
+.btn-icon-img {
+  width: 16px;
+  height: 16px;
+}
+
 .btn-icon:hover {
   background: rgba(255, 255, 255, 0.1);
   color: #fff;
 }
 
 .btn-icon.active {
-  background: #e94560;
-  color: #fff;
+  background: transparent;
+  color: inherit;
 }
 
 .btn-icon.close:hover {
@@ -759,6 +1147,7 @@ onUnmounted(() => {
   overflow: hidden;
   background: #0f0f1a;
   flex-shrink: 0;
+  cursor: pointer;
 }
 
 .history-thumb img {
@@ -770,6 +1159,7 @@ onUnmounted(() => {
 .history-info {
   flex: 1;
   min-width: 0;
+  cursor: pointer;
 }
 
 .history-question {
@@ -778,7 +1168,17 @@ onUnmounted(() => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  margin-bottom: 4px;
+}
+
+.edit-title-input {
+  width: 100%;
+  background: #2a2a4a;
+  border: 1px solid #c86b7d;
+  border-radius: 4px;
+  padding: 4px 8px;
+  color: #fff;
+  font-size: 13px;
+  outline: none;
 }
 
 .history-time {
@@ -863,6 +1263,12 @@ onUnmounted(() => {
 
 .message.assistant .message-avatar {
   background: #e94560;
+}
+
+.message-image {
+  max-width: 100%;
+  border-radius: 8px;
+  margin-bottom: 8px;
 }
 
 .message-content {
@@ -1001,5 +1407,220 @@ onUnmounted(() => {
   bottom: 0;
   right: 0;
   cursor: nwse-resize;
+}
+
+.btn-favorite {
+  background: transparent !important;
+  border: none !important;
+  padding: 6px 10px !important;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.btn-favorite:hover:not(:disabled) {
+  opacity: 0.8;
+}
+
+.btn-favorite img {
+  width: 20px;
+  height: 20px;
+}
+
+.favorites-search {
+  padding: 0 16px 16px;
+}
+
+.favorites-header {
+  padding: 16px 16px 0;
+}
+
+.favorites-title {
+  font-size: 15px;
+  font-weight: 500;
+  color: #fff;
+}
+
+.favorites-search input {
+  width: 100%;
+  background: #1f2849;
+  border: 1px solid #2a2a4a;
+  border-radius: 8px;
+  padding: 10px 14px;
+  color: #fff;
+  font-size: 14px;
+  outline: none;
+}
+
+.favorites-search input:focus {
+  border-color: #c86b7d;
+}
+
+.back-btn {
+  background: transparent;
+  border: none;
+  color: #888;
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.back-btn:hover {
+  color: #fff;
+}
+
+.back-btn svg {
+  width: 20px;
+  height: 20px;
+}
+
+.delete-btn {
+  background: transparent;
+  border: none;
+  color: #666;
+  cursor: pointer;
+  padding: 4px;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.history-item:hover .delete-btn {
+  opacity: 1;
+}
+
+.delete-btn:hover {
+  color: #e94560;
+}
+
+.delete-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.favorite-detail {
+  padding: 16px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.detail-image img {
+  width: 100%;
+  border-radius: 8px;
+  margin-bottom: 16px;
+}
+
+.detail-label {
+  font-size: 12px;
+  color: #888;
+  margin-top: 12px;
+  margin-bottom: 4px;
+}
+
+.detail-text {
+  color: #ccc;
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.dialog-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.dialog {
+  background: #1f2849;
+  border-radius: 12px;
+  padding: 16px;
+  width: 280px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.dialog-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.dialog-icon {
+  width: 16px;
+  height: 16px;
+}
+
+.dialog-icon-img {
+  width: 16px;
+  height: 16px;
+}
+
+.dialog-body input {
+  width: 100%;
+  background: #2a2a4a;
+  border: 1px solid #3a3a5a;
+  border-radius: 8px;
+  padding: 10px;
+  color: #fff;
+  font-size: 14px;
+  outline: none;
+}
+
+.dialog-body input:focus {
+  border-color: #c86b7d;
+}
+
+.dialog-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.dialog-footer .btn-cancel {
+  background: transparent;
+  border: 1px solid #3a3a5a;
+  color: #888;
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.dialog-footer .btn-cancel:hover {
+  border-color: #666;
+  color: #fff;
+}
+
+.dialog-footer .btn-confirm {
+  background: #c86b7d;
+  border: none;
+  color: #fff;
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.dialog-footer .btn-confirm:hover:not(:disabled) {
+  background: #e85570;
+}
+
+.dialog-footer .btn-confirm:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 </style>
