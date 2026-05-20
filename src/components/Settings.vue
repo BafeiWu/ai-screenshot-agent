@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useScreenshotStore } from '../store/screenshot'
 
 interface Settings {
@@ -30,7 +30,20 @@ const currentVersion = ref('')
 const updateStatus = ref('')
 const latestVersion = ref('')
 const isDownloading = ref(false)
-const downloadProgress = ref('')
+const downloadProgress = ref(0)
+const downloadSpeed = ref('')
+
+const formatBytes = (bytes: number) => {
+  if (!bytes) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let i = 0
+  let v = bytes
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024
+    i++
+  }
+  return `${v.toFixed(1)} ${units[i]}`
+}
 
 onMounted(async () => {
   try {
@@ -39,9 +52,22 @@ onMounted(async () => {
     currentVersion.value = '1.0.0'
   }
 
+  window.electronAPI.onDownloadProgress((progress) => {
+    downloadProgress.value = Math.round(progress.percent || 0)
+    downloadSpeed.value = `${formatBytes(progress.bytesPerSecond)}/s`
+    updateStatus.value = `下载中 ${downloadProgress.value}% (${formatBytes(progress.transferred)}/${formatBytes(progress.total)})`
+  })
+
   window.electronAPI.onUpdateDownloaded((info) => {
     updateStatus.value = `新版本 ${info.version} 已下载，点击安装`
     isDownloading.value = false
+    downloadProgress.value = 100
+  })
+
+  window.electronAPI.onUpdateError((message) => {
+    updateStatus.value = '更新失败: ' + message
+    isDownloading.value = false
+    downloadProgress.value = 0
   })
 })
 
@@ -87,14 +113,27 @@ const installUpdate = () => {
   window.electronAPI.installUpdate()
 }
 
+const updateBtnLabel = computed(() => {
+  if (isDownloading.value) return `下载中 ${downloadProgress.value}%`
+  if (updateStatus.value.includes('已下载')) return '立即安装'
+  if (updateStatus.value.includes('失败')) return '重试'
+  if (updateStatus.value.includes('点击下载')) return '下载'
+  return '检查更新'
+})
+
 const handleUpdateClick = () => {
-  if (latestVersion.value && !isDownloading.value) {
-    if (updateStatus.value.includes('点击下载')) {
+  if (isDownloading.value) return
+  if (updateStatus.value.includes('已下载')) {
+    installUpdate()
+  } else if (updateStatus.value.includes('失败')) {
+    if (latestVersion.value) {
       downloadUpdate()
-    } else if (updateStatus.value.includes('已下载')) {
-      installUpdate()
+    } else {
+      checkForUpdates()
     }
-  } else if (!updateStatus.value.includes('下载中')) {
+  } else if (latestVersion.value && updateStatus.value.includes('点击下载')) {
+    downloadUpdate()
+  } else {
     checkForUpdates()
   }
 }
@@ -314,8 +353,21 @@ onMounted(async () => {
       <span v-if="saveStatus" class="save-status">{{ saveStatus }}</span>
       <div class="version-info">
         <span class="version-text">v{{ currentVersion }}</span>
-        <button class="update-btn" @click="handleUpdateClick">{{ updateStatus.includes('下载') || updateStatus.includes('安装') || updateStatus.includes('下载中') ? '更新' : '检查更新' }}</button>
-        <span v-if="updateStatus" class="update-status" :class="{ clickable: updateStatus.includes('点击') }">{{ updateStatus }}</span>
+        <button
+          class="update-btn"
+          :class="{ 'update-btn-primary': updateStatus.includes('已下载'), 'update-btn-error': updateStatus.includes('失败') }"
+          @click="handleUpdateClick"
+          :disabled="isDownloading"
+        >
+          {{ updateBtnLabel }}
+        </button>
+        <div v-if="isDownloading" class="progress-wrap">
+          <div class="progress-bar">
+            <div class="progress-fill" :style="{ width: downloadProgress + '%' }"></div>
+          </div>
+          <span class="progress-text">{{ downloadProgress }}% · {{ downloadSpeed }}</span>
+        </div>
+        <span v-else-if="updateStatus" class="update-status" :class="{ clickable: updateStatus.includes('点击') || updateStatus.includes('已下载'), error: updateStatus.includes('失败') }">{{ updateStatus }}</span>
       </div>
       <button class="save-btn" @click="handleSave">保存</button>
     </div>
@@ -581,5 +633,65 @@ onMounted(async () => {
   color: #e94560;
   cursor: pointer;
   text-decoration: underline;
+}
+
+.progress-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 140px;
+}
+
+.progress-bar {
+  flex: 1;
+  height: 6px;
+  background: #2a2a4a;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #e94560, #f47b8e);
+  transition: width 0.2s ease;
+}
+
+.progress-text {
+  font-size: 11px;
+  color: #ccc;
+  white-space: nowrap;
+}
+
+.update-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.update-btn-primary {
+  background: #4ade80;
+  border-color: #4ade80;
+  color: #0f0f1a;
+  font-weight: 600;
+}
+
+.update-btn-primary:hover {
+  background: #22c55e;
+  border-color: #22c55e;
+  color: #0f0f1a;
+}
+
+.update-btn-error {
+  border-color: #f87171;
+  color: #f87171;
+}
+
+.update-btn-error:hover {
+  background: #f87171;
+  color: #0f0f1a;
+}
+
+.update-status.error {
+  color: #f87171;
 }
 </style>

@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick, computed } from 'vue'
-import { useScreenshotStore } from '../store/screenshot'
+import { ref, onMounted, onUnmounted, computed } from 'vue'
+import { useScreenshotStore, type Favorite, type FavoriteMessage } from '../store/screenshot'
 
 const store = useScreenshotStore()
-const messages = ref<Array<{ role: string; content: string; image?: string }>>([])
+const messages = ref<FavoriteMessage[]>([])
 const inputText = ref('')
 const isLoading = ref(false)
 const isStreaming = ref(false)
@@ -16,7 +16,17 @@ const windowStartY = ref(0)
 const showHistory = ref(false)
 const isFullscreen = ref(false)
 const screenshotHotkey = ref('Alt+S')
-const history = ref<Array<{ id: string; timestamp: number; imageData: string; question: string; answer: string; messages?: Array<{ role: string; content: string; image?: string }> }>>([])
+
+interface HistoryItem {
+  id: string
+  timestamp: number
+  imageData: string
+  question: string
+  answer: string
+  messages?: FavoriteMessage[]
+}
+
+const history = ref<HistoryItem[]>([])
 const currentHistoryId = ref<string | null>(null)
 
 const showFavorites = ref(false)
@@ -61,7 +71,7 @@ const startEditTitle = (item: { id: string; title: string }, event: MouseEvent) 
 
 const saveEditTitle = () => {
   if (editingFavoriteId.value && editingTitle.value.trim()) {
-    const updated = favorites.value.map(f => 
+    const updated = favorites.value.map((f: Favorite) =>
       f.id === editingFavoriteId.value ? { ...f, title: editingTitle.value.trim() } : f
     )
     store.setFavorites(updated)
@@ -88,7 +98,7 @@ const handleGlobalClick = (event: MouseEvent) => {
 const filteredFavorites = computed(() => {
   if (!favoriteSearch.value.trim()) return favorites.value
   const keyword = favoriteSearch.value.toLowerCase()
-  return favorites.value.filter(f => f.title.toLowerCase().includes(keyword))
+  return favorites.value.filter((f: Favorite) => f.title.toLowerCase().includes(keyword))
 })
 
 const loadFavorites = async () => {
@@ -119,7 +129,7 @@ const toggleFavorite = () => {
   if (isCurrentFavorited.value) {
     console.log('[toggleFavorite] removing favorite')
     if (currentFavoriteId.value) {
-      const newFavorites = favorites.value.filter(f => f.id !== currentFavoriteId.value)
+      const newFavorites = favorites.value.filter((f: Favorite) => f.id !== currentFavoriteId.value)
       store.setFavorites(newFavorites)
       saveFavorites()
       currentFavoriteId.value = null
@@ -136,12 +146,12 @@ const toggleFavorite = () => {
 const confirmFavorite = async () => {
   if (!favoriteTitle.value.trim()) return
   console.log('Confirming favorite...')
-  const lastUserMsg = messages.value.find(m => m.role === 'user')
-  const lastAssistantMsg = messages.value.find(m => m.role === 'assistant')
+  const lastUserMsg = messages.value.find((m: FavoriteMessage) => m.role === 'user')
+  const lastAssistantMsg = messages.value.find((m: FavoriteMessage) => m.role === 'assistant')
   const lastImage = lastUserMsg?.image || store.currentImage
   
   if (currentFavoriteId.value) {
-    const existingIndex = favorites.value.findIndex(f => f.id === currentFavoriteId.value)
+    const existingIndex = favorites.value.findIndex((f: Favorite) => f.id === currentFavoriteId.value)
     if (existingIndex !== -1) {
       const updatedFavorite = {
         ...favorites.value[existingIndex],
@@ -202,7 +212,7 @@ const viewFavorite = (fav: { id: string; imageData: string; question: string; an
 }
 
 const deleteFavorite = (id: string) => {
-  store.setFavorites(favorites.value.filter(f => f.id !== id))
+  store.setFavorites(favorites.value.filter((f: Favorite) => f.id !== id))
   saveFavorites()
 }
 
@@ -364,7 +374,7 @@ const sendMessage = async () => {
   const msgIndex = messages.value.length - 1
 
   try {
-    const response = await store.sendToAI(inputText.value, messages.value, undefined, (token) => {
+    const response = await store.sendToAI(inputText.value, messages.value, undefined, (token: string) => {
       isStreaming.value = true
       messages.value[msgIndex].content += token
       scrollToBottom()
@@ -443,7 +453,7 @@ const clearChat = async () => {
   store.setCurrentImage('')
   if (isCurrentFavorited.value && currentFavoriteId.value) {
     console.log('[clearChat] deleting favorite:', currentFavoriteId.value)
-    const newFavorites = favorites.value.filter(f => f.id !== currentFavoriteId.value)
+    const newFavorites = favorites.value.filter((f: Favorite) => f.id !== currentFavoriteId.value)
     store.setFavorites(newFavorites)
     await saveFavorites()
     currentFavoriteId.value = null
@@ -504,9 +514,9 @@ const toggleFavorites = async () => {
     showFavorites.value = false
   } else {
     if (isCurrentFavorited.value && messages.value.length > 0) {
-      const lastUserMsg = messages.value.find(m => m.role === 'user')
-      const lastAssistantMsg = messages.value.find(m => m.role === 'assistant')
-      const favToUpdate = favorites.value.find(f => f.id === currentFavoriteId.value)
+      const lastUserMsg = messages.value.find((m: FavoriteMessage) => m.role === 'user')
+      const lastAssistantMsg = messages.value.find((m: FavoriteMessage) => m.role === 'assistant')
+      const favToUpdate = favorites.value.find((f: Favorite) => f.id === currentFavoriteId.value)
       if (favToUpdate && lastUserMsg && lastAssistantMsg) {
         const updatedFavorite = {
           ...favToUpdate,
@@ -515,7 +525,7 @@ const toggleFavorites = async () => {
           answer: lastAssistantMsg.content || '',
           messages: JSON.parse(JSON.stringify(messages.value))
         }
-        const newFavorites = favorites.value.map(f => f.id === favToUpdate.id ? updatedFavorite : f)
+        const newFavorites = favorites.value.map((f: Favorite) => f.id === favToUpdate.id ? updatedFavorite : f)
         store.setFavorites(newFavorites)
         await saveFavorites()
       }
@@ -614,7 +624,7 @@ onMounted(async () => {
     scrollToBottom()
 
     try {
-      const response = await store.sendToAI(prompt, [], data.dataUrl, (token) => {
+      const response = await store.sendToAI(prompt, [], data.dataUrl, (token: string) => {
         isStreaming.value = true
         messages.value[msgIndex].content += token
         scrollToBottom()
@@ -663,7 +673,7 @@ onUnmounted(() => {
             <circle cx="20.5" cy="14.5" r="1" fill="url(#logoGrad)"/>
           </svg>
         </span>
-        <span class="title">AI截图</span>
+        <span class="title">SnapAI</span>
       </div>
       <div class="header-actions">
         <button class="btn-icon" @click="openSettings" title="设置">
@@ -935,20 +945,24 @@ onUnmounted(() => {
   cursor: move;
   user-select: none;
   -webkit-app-region: drag;
+  gap: 8px;
 }
 
 .header-left {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+  flex: 1;
 }
 
 .logo {
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
 }
 
 .logo svg {
@@ -957,8 +971,25 @@ onUnmounted(() => {
 }
 
 .title {
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background: linear-gradient(90deg, #ff6b8b 0%, #e94560 30%, #a855f7 65%, #38bdf8 100%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  animation: titleShine 6s linear infinite;
+  text-transform: uppercase;
+}
+
+@keyframes titleShine {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
 }
 
 .header-actions {

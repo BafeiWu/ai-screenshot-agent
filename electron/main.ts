@@ -1,5 +1,6 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, Tray, Menu, nativeImage, screen, desktopCapturer } from 'electron'
+import { app, BrowserWindow, globalShortcut, ipcMain, Tray, Menu, nativeImage, screen, desktopCapturer, dialog, Notification } from 'electron'
 import path from 'path'
+import fs from 'fs'
 import Store from 'electron-store'
 import { autoUpdater } from 'electron-updater'
 import log from 'electron-log'
@@ -8,6 +9,40 @@ log.transports.file.level = 'info'
 autoUpdater.logger = log
 autoUpdater.autoDownload = false
 autoUpdater.autoInstallOnAppQuit = true
+
+function isNewerVersion(remote: string, current: string): boolean {
+  const parse = (v: string) => v.replace(/^v/, '').split('-')[0].split('.').map(n => parseInt(n, 10) || 0)
+  const r = parse(remote)
+  const c = parse(current)
+  for (let i = 0; i < Math.max(r.length, c.length); i++) {
+    const a = r[i] || 0
+    const b = c[i] || 0
+    if (a > b) return true
+    if (a < b) return false
+  }
+  return false
+}
+
+function migrateLegacyUserData() {
+  try {
+    const oldDir = path.join(app.getPath('appData'), 'AI截图')
+    const newDir = app.getPath('userData')
+    const flagFile = path.join(newDir, '.migrated-from-legacy')
+
+    if (!fs.existsSync(oldDir)) return
+    if (fs.existsSync(flagFile)) return
+    if (fs.existsSync(path.join(newDir, 'config.json'))) return
+
+    fs.mkdirSync(newDir, { recursive: true })
+    fs.cpSync(oldDir, newDir, { recursive: true, force: false, errorOnExist: false })
+    fs.writeFileSync(flagFile, new Date().toISOString())
+    log.info(`Migrated user data from ${oldDir} to ${newDir}`)
+  } catch (err) {
+    log.error('Legacy data migration failed:', err)
+  }
+}
+
+migrateLegacyUserData()
 
 const store = new Store()
 
@@ -250,7 +285,7 @@ function createTray() {
     }
 
     tray = new Tray(trayIcon)
-    tray.setToolTip('AI截图')
+    tray.setToolTip('SnapAI')
     buildTrayMenu()
 
     tray.on('click', () => {
@@ -443,14 +478,17 @@ function setupIPC() {
         return { updateAvailable: false, version: app.getVersion(), notes: '' }
       }
       const result = await autoUpdater.checkForUpdates()
-      if (result && result.updateInfo) {
+      const currentVersion = app.getVersion()
+      const remoteVersion = result?.updateInfo?.version
+
+      if (remoteVersion && isNewerVersion(remoteVersion, currentVersion)) {
         return {
           updateAvailable: true,
-          version: result.updateInfo.version,
+          version: remoteVersion,
           notes: result.updateInfo.releaseNotes || ''
         }
       }
-      return { updateAvailable: false, version: app.getVersion(), notes: '' }
+      return { updateAvailable: false, version: currentVersion, notes: '' }
     } catch (error) {
       log.error('Update check failed:', error)
       return { updateAvailable: false, version: app.getVersion(), notes: '' }
@@ -462,7 +500,9 @@ function setupIPC() {
       if (VITE_DEV_SERVER_URL) {
         return { success: false, error: 'Cannot download in dev mode' }
       }
-      await autoUpdater.downloadUpdate()
+      autoUpdater.downloadUpdate().catch((err) => {
+        log.error('Download update failed:', err)
+      })
       return { success: true }
     } catch (error) {
       log.error('Download update failed:', error)
@@ -579,6 +619,22 @@ app.whenReady().then(() => {
       }
     })
 
+    autoUpdater.on('download-progress', (progress) => {
+      const payload = {
+        percent: progress.percent,
+        bytesPerSecond: progress.bytesPerSecond,
+        transferred: progress.transferred,
+        total: progress.total
+      }
+      log.info(`Download progress: ${progress.percent.toFixed(2)}%`)
+      if (settingsWindow) {
+        settingsWindow.webContents.send('download-progress', payload)
+      }
+      if (panelWindow) {
+        panelWindow.webContents.send('download-progress', payload)
+      }
+    })
+
     autoUpdater.on('update-downloaded', (info) => {
       log.info('Update downloaded:', info.version)
       if (settingsWindow) {
@@ -587,10 +643,49 @@ app.whenReady().then(() => {
       if (panelWindow) {
         panelWindow.webContents.send('update-downloaded', info)
       }
+
+      if (Notification.isSupported()) {
+        new Notification({
+          title: '更新已下载',
+          body: `新版本 ${info.version} 已下载，点击立即安装`
+        }).show()
+      }
+
+      const targetWindow = settingsWindow || panelWindow || mainWindow
+      if (targetWindow) {
+        dialog.showMessageBox(targetWindow, {
+          type: 'info',
+          title: '更新已就绪',
+          message: `新版本 ${info.version} 已下载完成`,
+          detail: '点击"立即安装"重启应用并完成更新，或稍后在退出应用时自动安装。',
+          buttons: ['立即安装', '稍后'],
+          defaultId: 0,
+          cancelId: 1
+        }).then((result) => {
+          if (result.response === 0) {
+            autoUpdater.quitAndInstall()
+          }
+        })
+      }
     })
 
     autoUpdater.on('error', (error) => {
       log.error('AutoUpdater error:', error)
+      const rawMessage = error?.message || String(error)
+      let friendlyMessage = rawMessage
+      if (/sha512/i.test(rawMessage) && /expected/i.test(rawMessage)) {
+        friendlyMessage = '安装包校验失败：服务器上的安装包与版本清单不一致，请联系开发者重新发布。'
+      } else if (/ENOTFOUND|ETIMEDOUT|ECONNRESET|net::/i.test(rawMessage)) {
+        friendlyMessage = '网络连接失败，请检查网络后重试。'
+      } else if (/404/.test(rawMessage)) {
+        friendlyMessage = '未找到安装包文件（可能 Release 缺少 .exe 或 latest.yml）。'
+      }
+      if (settingsWindow) {
+        settingsWindow.webContents.send('update-error', friendlyMessage)
+      }
+      if (panelWindow) {
+        panelWindow.webContents.send('update-error', friendlyMessage)
+      }
     })
 
     autoUpdater.checkForUpdates().catch((err) => {

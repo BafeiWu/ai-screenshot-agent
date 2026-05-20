@@ -6,17 +6,33 @@ interface Message {
   content: string
 }
 
+export interface FavoriteMessage {
+  role: string
+  content: string
+  image?: string
+}
+
+export interface Favorite {
+  id: string
+  title: string
+  timestamp: number
+  imageData: string
+  question: string
+  answer: string
+  messages?: FavoriteMessage[]
+}
+
 export const useScreenshotStore = defineStore('screenshot', () => {
   const currentImage = ref<string | null>(null)
   const apiKey = ref<string>('')
   const conversationId = ref<string>('')
-  const favorites = ref<Array<{ id: string; title: string; timestamp: number; imageData: string; question: string; answer: string; messages?: Array<{ role: string; content: string; image?: string }> }>>([])
+  const favorites = ref<Favorite[]>([])
 
   const setCurrentImage = (image: string | null) => {
     currentImage.value = image
   }
 
-  const setFavorites = (data: Array<{ id: string; title: string; timestamp: number; imageData: string; question: string; answer: string; messages?: Array<{ role: string; content: string; image?: string }> }>) => {
+  const setFavorites = (data: Favorite[]) => {
     favorites.value = data
   }
 
@@ -182,6 +198,8 @@ declare global {
       installUpdate: () => Promise<void>
       onUpdateAvailable: (callback: (info: { version: string }) => void) => void
       onUpdateDownloaded: (callback: (info: { version: string }) => void) => void
+      onDownloadProgress: (callback: (progress: { percent: number; bytesPerSecond: number; transferred: number; total: number }) => void) => void
+      onUpdateError: (callback: (message: string) => void) => void
       getFavorites: () => Promise<any[]>
       saveFavorites: (favorites: any[]) => Promise<boolean>
       onScreenshotTaken: (callback: (data: { type: string; dataUrl: string; customPrompt?: string }) => void) => void
