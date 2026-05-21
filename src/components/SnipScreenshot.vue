@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
+import Tesseract from 'tesseract.js'
 import { useScreenshotStore } from '../store/screenshot'
 
 type Mode = 'select' | 'annotate'
@@ -55,6 +56,29 @@ const translatePanelSize = ref({ w: 360, h: 120 })
 let annotResizeObserver: ResizeObserver | null = null
 let translateResizeObserver: ResizeObserver | null = null
 const BOTTOM_SAFE = 130
+
+interface OcrWord {
+  text: string
+  left: number
+  top: number
+  width: number
+  height: number
+  lineId: number
+  wordIndex: number
+}
+const ocrWords = ref<OcrWord[]>([])
+const ocrLoading = ref(false)
+const ocrProgress = ref(0)
+const ocrSelectedIds = ref<Set<string>>(new Set())
+const ocrToast = ref('')
+let ocrToastTimer: ReturnType<typeof setTimeout> | null = null
+let ocrAbortToken = 0
+const ocrSelecting = ref(false)
+const ocrSelectStart = ref<{ x: number; y: number } | null>(null)
+const ocrSelectRect = ref<{ x: number; y: number; w: number; h: number } | null>(null)
+const ocrShown = ref(false)
+const ocrCopiedFlash = ref(false)
+let ocrCopiedFlashTimer: ReturnType<typeof setTimeout> | null = null
 
 const PRESET_COLORS = ['#ff3b30', '#ff9500', '#ffcc00', '#34c759', '#0a84ff', '#ffffff', '#000000']
 const WIDTHS = [2, 4, 7]
@@ -357,10 +381,302 @@ const clearAnnotations = () => {
 
 const reselect = () => {
   if (showTranslatePanel.value) closeTranslatePanel()
+  resetOcr()
   annotations.value = []
   selection.value = { x: 0, y: 0, width: 0, height: 0 }
   mode.value = 'select'
   draw()
+}
+
+const showOcrToast = (text: string) => {
+  ocrToast.value = text
+  if (ocrToastTimer) clearTimeout(ocrToastTimer)
+  ocrToastTimer = setTimeout(() => {
+    ocrToast.value = ''
+  }, 1500)
+}
+
+const resetOcr = () => {
+  ocrAbortToken++
+  ocrLoading.value = false
+  ocrProgress.value = 0
+  ocrWords.value = []
+  ocrSelectedIds.value = new Set()
+  ocrSelectRect.value = null
+  ocrSelecting.value = false
+  ocrShown.value = false
+}
+
+const runSelectionOcr = async () => {
+  if (!hasSelection.value || !backgroundImage.value) return
+  const s = { ...selection.value }
+  ocrAbortToken++
+  const token = ocrAbortToken
+  ocrShown.value = true
+  ocrLoading.value = true
+  ocrProgress.value = 0
+  ocrWords.value = []
+  ocrSelectedIds.value = new Set()
+  ocrSelectRect.value = null
+
+  try {
+    const out = document.createElement('canvas')
+    out.width = s.width
+    out.height = s.height
+    const ctx = out.getContext('2d')
+    if (!ctx) {
+      ocrLoading.value = false
+      return
+    }
+    ctx.drawImage(backgroundImage.value, s.x, s.y, s.width, s.height, 0, 0, s.width, s.height)
+    const dataUrl = out.toDataURL('image/png')
+
+    const result = await Tesseract.recognize(dataUrl, 'chi_sim+eng', {
+      logger: (m: any) => {
+        if (token !== ocrAbortToken) return
+        if (m.status === 'recognizing text' && typeof m.progress === 'number') {
+          ocrProgress.value = Math.round(m.progress * 100)
+        }
+      }
+    })
+    if (token !== ocrAbortToken) return
+
+    const data: any = result.data
+    const words: OcrWord[] = []
+    let lineId = 0
+    let wordIndex = 0
+    const collectFromLines = (lines: any[]) => {
+      for (const line of lines) {
+        const lineWords = line.words || []
+        for (const w of lineWords) {
+          if (!w.text || !w.text.trim()) continue
+          const bbox = w.bbox || {}
+          words.push({
+            text: w.text,
+            left: bbox.x0 ?? 0,
+            top: bbox.y0 ?? 0,
+            width: (bbox.x1 ?? 0) - (bbox.x0 ?? 0),
+            height: (bbox.y1 ?? 0) - (bbox.y0 ?? 0),
+            lineId,
+            wordIndex: wordIndex++
+          })
+        }
+        lineId++
+      }
+    }
+    if (data.blocks && data.blocks.length) {
+      for (const block of data.blocks) {
+        for (const para of (block.paragraphs || [])) {
+          collectFromLines(para.lines || [])
+        }
+      }
+    } else if (data.lines) {
+      collectFromLines(data.lines)
+    }
+    ocrWords.value = words
+    if (!words.length) {
+      showOcrToast('未识别到文字')
+    }
+  } catch (err) {
+    if (token === ocrAbortToken) {
+      console.error('OCR failed:', err)
+      showOcrToast('识别失败')
+    }
+  } finally {
+    if (token === ocrAbortToken) {
+      ocrLoading.value = false
+    }
+  }
+}
+
+const ocrWordKey = (w: OcrWord) => `${w.lineId}-${w.wordIndex}`
+
+const ocrSelectionLayerStyle = computed(() => {
+  const s = selection.value
+  return {
+    left: `${s.x}px`,
+    top: `${s.y}px`,
+    width: `${s.width}px`,
+    height: `${s.height}px`
+  }
+})
+
+const handleOcrLayerMouseDown = (e: MouseEvent) => {
+  if (e.button !== 0) return
+  if (mode.value !== 'annotate') return
+  e.preventDefault()
+  e.stopPropagation()
+  const layer = e.currentTarget as HTMLElement
+  const rect = layer.getBoundingClientRect()
+  const x = e.clientX - rect.left
+  const y = e.clientY - rect.top
+  ocrSelecting.value = true
+  ocrSelectStart.value = { x, y }
+  ocrSelectRect.value = { x, y, w: 0, h: 0 }
+  if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
+    ocrSelectedIds.value = new Set()
+  }
+  window.addEventListener('mousemove', handleOcrLayerMouseMove)
+  window.addEventListener('mouseup', handleOcrLayerMouseUp)
+}
+
+const handleOcrLayerMouseMove = (e: MouseEvent) => {
+  if (!ocrSelecting.value || !ocrSelectStart.value) return
+  const s = selection.value
+  const localX = Math.max(0, Math.min(s.width, e.clientX - s.x))
+  const localY = Math.max(0, Math.min(s.height, e.clientY - s.y))
+  const sx = ocrSelectStart.value.x
+  const sy = ocrSelectStart.value.y
+  ocrSelectRect.value = {
+    x: Math.min(localX, sx),
+    y: Math.min(localY, sy),
+    w: Math.abs(localX - sx),
+    h: Math.abs(localY - sy)
+  }
+  computeOcrSelection()
+}
+
+const handleOcrLayerMouseUp = () => {
+  ocrSelecting.value = false
+  ocrSelectRect.value = null
+  window.removeEventListener('mousemove', handleOcrLayerMouseMove)
+  window.removeEventListener('mouseup', handleOcrLayerMouseUp)
+}
+
+const computeOcrSelection = () => {
+  const r = ocrSelectRect.value
+  if (!r) return
+  const next = new Set<string>()
+  for (const w of ocrWords.value) {
+    const cx = w.left + w.width / 2
+    const cy = w.top + w.height / 2
+    if (cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h) {
+      next.add(ocrWordKey(w))
+    }
+  }
+  ocrSelectedIds.value = next
+}
+
+const toggleOcrWord = (w: OcrWord, e: MouseEvent) => {
+  e.stopPropagation()
+  e.preventDefault()
+  const key = ocrWordKey(w)
+  const next = new Set(ocrSelectedIds.value)
+  if (e.shiftKey || e.ctrlKey || e.metaKey) {
+    if (next.has(key)) next.delete(key)
+    else next.add(key)
+  } else {
+    if (next.size === 1 && next.has(key)) {
+      next.clear()
+    } else {
+      next.clear()
+      next.add(key)
+    }
+  }
+  ocrSelectedIds.value = next
+}
+
+const ocrAllSelected = computed(() =>
+  ocrWords.value.length > 0 && ocrSelectedIds.value.size === ocrWords.value.length
+)
+
+const toggleOcrSelectAll = () => {
+  if (ocrAllSelected.value) {
+    ocrSelectedIds.value = new Set()
+  } else {
+    const next = new Set<string>()
+    for (const w of ocrWords.value) next.add(ocrWordKey(w))
+    ocrSelectedIds.value = next
+  }
+}
+
+const ocrSelectAll = () => {
+  const next = new Set<string>()
+  for (const w of ocrWords.value) next.add(ocrWordKey(w))
+  ocrSelectedIds.value = next
+}
+
+const buildOcrText = (filterIds?: Set<string>): string => {
+  const list = filterIds && filterIds.size > 0
+    ? ocrWords.value.filter((w: OcrWord) => filterIds.has(ocrWordKey(w)))
+    : [...ocrWords.value]
+  list.sort((a: OcrWord, b: OcrWord) => a.lineId - b.lineId || a.wordIndex - b.wordIndex)
+  const lines: string[] = []
+  let currentLine = -1
+  let buffer: string[] = []
+  for (const w of list) {
+    if (w.lineId !== currentLine) {
+      if (buffer.length) lines.push(buffer.join(' '))
+      buffer = [w.text]
+      currentLine = w.lineId
+    } else {
+      buffer.push(w.text)
+    }
+  }
+  if (buffer.length) lines.push(buffer.join(' '))
+  return lines.join('\n').replace(/\s+([，。！？、；：）】」』])/g, '$1').replace(/([（【「『])\s+/g, '$1')
+}
+
+const writeClipboard = async (text: string): Promise<boolean> => {
+  try {
+    const api = (window.electronAPI as any)
+    if (api && typeof api.writeClipboardText === 'function') {
+      const res = await api.writeClipboardText(text)
+      if (res && res.success) return true
+    }
+  } catch (e) {
+    console.error('writeClipboardText failed:', e)
+  }
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch (e) {
+    console.error('navigator.clipboard.writeText failed:', e)
+    return false
+  }
+}
+
+const toggleOcr = () => {
+  if (ocrShown.value || ocrLoading.value) {
+    resetOcr()
+  } else {
+    runSelectionOcr()
+  }
+}
+
+const flashOcrCopied = () => {
+  ocrCopiedFlash.value = true
+  if (ocrCopiedFlashTimer) clearTimeout(ocrCopiedFlashTimer)
+  ocrCopiedFlashTimer = setTimeout(() => {
+    ocrCopiedFlash.value = false
+  }, 1100)
+}
+
+const copyOcrText = async () => {
+  if (ocrWords.value.length === 0) {
+    showOcrToast('暂无识别内容')
+    return
+  }
+  const useSelection = ocrSelectedIds.value.size > 0
+  const text = useSelection ? buildOcrText(ocrSelectedIds.value) : buildOcrText()
+  if (!text) {
+    showOcrToast('复制失败')
+    return
+  }
+  const ok = await writeClipboard(text)
+  if (!ok) {
+    showOcrToast('复制失败')
+    return
+  }
+  flashOcrCopied()
+  setTimeout(() => {
+    resetOcr()
+    window.electronAPI.exitScreenshot()
+  }, 280)
+}
+
+const reRunOcr = () => {
+  runSelectionOcr()
 }
 
 const buildCroppedDataUrl = (): string | null => {
@@ -405,6 +721,23 @@ const copyCroppedImage = async () => {
       console.error('copy image failed', e)
     }
   }, 'image/png')
+}
+
+const pinSelection = async () => {
+  const dataUrl = buildCroppedDataUrl()
+  if (!dataUrl) return
+  try {
+    const api = (window.electronAPI as any)
+    if (!api || typeof api.pinScreenshot !== 'function') {
+      console.error('pinScreenshot api unavailable')
+      return
+    }
+    await api.pinScreenshot(dataUrl)
+    resetOcr()
+    window.electronAPI.exitScreenshot()
+  } catch (e) {
+    console.error('pin selection failed', e)
+  }
 }
 
 const parseTranslateResponse = (raw: string): TranslationLine[] => {
@@ -515,6 +848,7 @@ const confirmSelection = async () => {
 }
 
 const cancelScreenshot = () => {
+  resetOcr()
   window.electronAPI.exitScreenshot()
 }
 
@@ -592,6 +926,8 @@ onUnmounted(() => {
   window.removeEventListener('keydown', onKeyDown)
   annotResizeObserver?.disconnect()
   translateResizeObserver?.disconnect()
+  if (ocrToastTimer) clearTimeout(ocrToastTimer)
+  if (ocrCopiedFlashTimer) clearTimeout(ocrCopiedFlashTimer)
 })
 </script>
 
@@ -605,6 +941,31 @@ onUnmounted(() => {
       @mouseup="onMouseUp"
       @mouseleave="onMouseLeave"
     ></canvas>
+
+    <div
+      v-if="hasSelection && ocrShown && ocrWords.length"
+      class="ocr-layer"
+      :style="ocrSelectionLayerStyle"
+      @mousedown="handleOcrLayerMouseDown"
+    >
+      <div
+        v-for="w in ocrWords"
+        :key="ocrWordKey(w)"
+        class="ocr-word"
+        :class="{ selected: ocrSelectedIds.has(ocrWordKey(w)) }"
+        :style="{ left: w.left + 'px', top: w.top + 'px', width: w.width + 'px', height: w.height + 'px' }"
+        @mousedown.stop
+        @click="toggleOcrWord(w, $event)"
+        :title="w.text"
+      ></div>
+      <div
+        v-if="ocrSelectRect"
+        class="ocr-marquee"
+        :style="{ left: ocrSelectRect.x + 'px', top: ocrSelectRect.y + 'px', width: ocrSelectRect.w + 'px', height: ocrSelectRect.h + 'px' }"
+      ></div>
+    </div>
+
+    <div v-if="ocrToast" class="ocr-toast">{{ ocrToast }}</div>
 
     <div class="annot-toolbar" ref="annotToolbarRef" :style="annotationToolbarStyle">
       <div class="group">
@@ -682,6 +1043,64 @@ onUnmounted(() => {
           <svg v-else viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
             <path d="M5 12l5 5L20 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
+        </button>
+        <button
+          class="tool-btn pin-btn"
+          @click="pinSelection"
+          :disabled="!hasSelection"
+          title="置顶（Esc 关闭，滚轮缩放，按住拖动）"
+        >
+          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M14 3l7 7-3.2 1.4-3.6 3.6-1 5L8 14 3 19M14 10l-4 4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      </div>
+      <div class="divider"></div>
+      <div class="group">
+        <button
+          v-if="ocrShown && !ocrLoading && ocrWords.length"
+          class="tool-btn ocr-sub-btn select-all-btn"
+          :class="{ active: ocrSelectedIds.size > 0 }"
+          @click="toggleOcrSelectAll"
+          :title="ocrAllSelected ? '取消全选' : '全选文字'"
+        >
+          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="4" y="4" width="16" height="16" rx="2" stroke="currentColor" stroke-width="1.7"/>
+            <path v-if="ocrSelectedIds.size > 0" d="M8 12l3 3 5-6" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span class="ocr-label">{{ ocrSelectedIds.size > 0 ? `已选 ${ocrSelectedIds.size}` : '全选' }}</span>
+        </button>
+        <button
+          class="tool-btn ocr-btn-toolbar"
+          :class="{ active: ocrShown || ocrLoading, loading: ocrLoading }"
+          @click="toggleOcr"
+          :disabled="!hasSelection"
+          :title="ocrShown ? '取消文字识别' : '提取文字 (OCR)'"
+        >
+          <svg v-if="ocrLoading" class="ocr-spinner-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-dasharray="14 36"/>
+          </svg>
+          <svg v-else viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M4 7V5a1 1 0 0 1 1-1h2M20 7V5a1 1 0 0 0-1-1h-2M4 17v2a1 1 0 0 0 1 1h2M20 17v2a1 1 0 0 1-1 1h-2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+            <path d="M7 10h2v4H7zM11 10h2v4h-2zM15 10h2v4h-2z" fill="currentColor"/>
+          </svg>
+          <span class="ocr-label">{{ ocrLoading ? `识别中 ${ocrProgress}%` : (ocrShown ? '取消识别' : '提取文字') }}</span>
+        </button>
+        <button
+          v-if="ocrShown && !ocrLoading && ocrWords.length"
+          class="tool-btn ocr-sub-btn copy-btn"
+          :class="{ flashed: ocrCopiedFlash }"
+          @click="copyOcrText"
+          :title="ocrCopiedFlash ? '已复制' : (ocrSelectedIds.size ? '复制所选 (' + ocrSelectedIds.size + ')' : '复制全部文字')"
+        >
+          <svg v-if="!ocrCopiedFlash" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" stroke-width="1.7"/>
+            <path d="M5 15V5a2 2 0 0 1 2-2h10" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+          </svg>
+          <svg v-else viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M5 12l5 5L20 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span class="ocr-label">{{ ocrCopiedFlash ? '已复制' : (ocrSelectedIds.size ? '复制所选' : '复制文字') }}</span>
         </button>
       </div>
       <div class="divider"></div>
@@ -1104,6 +1523,11 @@ onUnmounted(() => {
   color: #6dd58f !important;
 }
 
+.pin-btn:hover:not(:disabled) {
+  background: rgba(184, 90, 107, 0.25) !important;
+  color: #ffb6c4 !important;
+}
+
 .translate-panel {
   position: fixed;
   z-index: 12;
@@ -1261,5 +1685,144 @@ onUnmounted(() => {
 .translate-panel-body::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.12);
   border-radius: 3px;
+}
+
+.ocr-layer {
+  position: fixed;
+  z-index: 9;
+  cursor: text;
+  user-select: none;
+}
+
+.ocr-word {
+  position: absolute;
+  border: 1px solid rgba(56, 189, 248, 0.55);
+  background: rgba(56, 189, 248, 0.12);
+  cursor: pointer;
+  box-sizing: border-box;
+  transition: background 0.1s, border-color 0.1s;
+}
+
+.ocr-word:hover {
+  background: rgba(56, 189, 248, 0.25);
+  border-color: rgba(56, 189, 248, 0.95);
+}
+
+.ocr-word.selected {
+  background: rgba(184, 90, 107, 0.42);
+  border-color: rgba(184, 90, 107, 1);
+  box-shadow: 0 0 0 1px rgba(184, 90, 107, 0.7) inset;
+}
+
+.ocr-marquee {
+  position: absolute;
+  border: 1px dashed rgba(255, 255, 255, 0.95);
+  background: rgba(255, 255, 255, 0.08);
+  pointer-events: none;
+  box-sizing: border-box;
+}
+
+.ocr-btn-toolbar {
+  width: auto !important;
+  padding: 0 10px;
+  gap: 6px;
+  background: rgba(184, 90, 107, 0.18);
+  color: #ffb6c4;
+}
+
+.ocr-btn-toolbar:hover:not(:disabled) {
+  background: rgba(184, 90, 107, 0.35) !important;
+  color: #fff !important;
+}
+
+.ocr-btn-toolbar.active {
+  background: rgba(184, 90, 107, 0.5) !important;
+  color: #fff !important;
+}
+
+.ocr-btn-toolbar.loading {
+  cursor: wait;
+}
+
+.ocr-btn-toolbar:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.ocr-spinner-icon {
+  animation: ocrSpin 0.9s linear infinite;
+}
+
+@keyframes ocrSpin {
+  to { transform: rotate(360deg); }
+}
+
+.ocr-sub-btn {
+  width: auto !important;
+  padding: 0 10px;
+  gap: 6px;
+}
+
+.ocr-sub-btn.select-all-btn {
+  background: rgba(255, 255, 255, 0.04);
+  color: #d0d0dc;
+  border: 1px solid transparent;
+}
+
+.ocr-sub-btn.select-all-btn:hover {
+  background: rgba(184, 90, 107, 0.18);
+  color: #ffb6c4;
+}
+
+.ocr-sub-btn.select-all-btn.active {
+  background: rgba(184, 90, 107, 0.35);
+  color: #fff;
+  border-color: rgba(184, 90, 107, 0.6);
+}
+
+.ocr-sub-btn.select-all-btn.active:hover {
+  background: rgba(184, 90, 107, 0.5);
+}
+
+.ocr-sub-btn.copy-btn {
+  background: rgba(184, 90, 107, 0.18);
+  color: #ffb6c4;
+}
+
+.ocr-sub-btn.copy-btn:hover:not(:disabled) {
+  background: rgba(184, 90, 107, 0.35) !important;
+  color: #fff !important;
+}
+
+.ocr-sub-btn.copy-btn.flashed {
+  background: rgba(52, 199, 89, 0.25) !important;
+  color: #6dd58f !important;
+}
+
+.ocr-label {
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.ocr-toast {
+  position: fixed;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  padding: 8px 16px;
+  background: rgba(20, 24, 40, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  color: #fff;
+  font-size: 12px;
+  backdrop-filter: blur(8px);
+  animation: ocrToastIn 0.18s ease-out;
+}
+
+@keyframes ocrToastIn {
+  from { opacity: 0; transform: translate(-50%, -8px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
 }
 </style>

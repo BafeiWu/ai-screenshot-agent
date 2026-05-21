@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, Tray, Menu, nativeImage, screen, desktopCapturer, dialog, Notification } from 'electron'
+import { app, BrowserWindow, globalShortcut, ipcMain, Tray, Menu, nativeImage, screen, desktopCapturer, dialog, Notification, clipboard } from 'electron'
 import path from 'path'
 import fs from 'fs'
 import Store from 'electron-store'
@@ -51,6 +51,9 @@ let panelWindow: BrowserWindow | null = null
 let settingsWindow: BrowserWindow | null = null
 let screenshotWindow: BrowserWindow | null = null
 let pendingScreenshotImage: string = ''
+const pinnedWindows = new Set<BrowserWindow>()
+const pinnedWindowImages = new WeakMap<BrowserWindow, string>()
+const pinnedDragLock = new WeakMap<BrowserWindow, { width: number; height: number }>()
 let tray: Tray | null = null
 
 const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL
@@ -60,6 +63,25 @@ function getAssetPath(...paths: string[]): string {
     ? path.join(__dirname, '..')
     : process.resourcesPath
   return path.join(basePath, ...paths)
+}
+
+function parsePngDimensions(dataUrl: string): { width: number; height: number } | null {
+  try {
+    const m = dataUrl.match(/^data:image\/(png|jpeg|jpg|webp);base64,(.+)$/i)
+    if (!m) return null
+    const buf = Buffer.from(m[2], 'base64')
+    if (m[1].toLowerCase() === 'png' && buf.length >= 24 && buf.toString('ascii', 1, 4) === 'PNG') {
+      const width = buf.readUInt32BE(16)
+      const height = buf.readUInt32BE(20)
+      if (width > 0 && height > 0) return { width, height }
+    }
+    const img = nativeImage.createFromBuffer(buf)
+    const size = img.getSize()
+    if (size.width > 0 && size.height > 0) return size
+    return null
+  } catch {
+    return null
+  }
 }
 
 function getAppIcon(): nativeImage {
@@ -546,6 +568,16 @@ function setupIPC() {
     }
   })
 
+  ipcMain.handle('write-clipboard-text', (_, text: string) => {
+    try {
+      clipboard.writeText(typeof text === 'string' ? text : '')
+      return { success: true }
+    } catch (error) {
+      console.error('write-clipboard-text failed:', error)
+      return { success: false, error: String(error) }
+    }
+  })
+
   ipcMain.handle('open-settings-from-screenshot', () => {
     if (screenshotWindow) {
       screenshotWindow.hide()
@@ -590,6 +622,140 @@ function setupIPC() {
     panelWindow?.webContents.send('screenshot-taken', { type: 'cropped', dataUrl: croppedImageData, customPrompt })
     panelWindow?.show()
     panelWindow?.focus()
+  })
+
+  ipcMain.handle('pin-screenshot', async (_, imageData: string) => {
+    if (!imageData) return { success: false }
+    try {
+      const dim = parsePngDimensions(imageData)
+      const cursor = screen.getCursorScreenPoint()
+      const display = screen.getDisplayNearestPoint(cursor)
+      const work = display.workArea
+      const maxW = Math.max(120, Math.floor(work.width * 0.9))
+      const maxH = Math.max(120, Math.floor(work.height * 0.9))
+      let w = dim?.width || 400
+      let h = dim?.height || 300
+      const ratio = Math.min(maxW / w, maxH / h, 1)
+      w = Math.max(80, Math.round(w * ratio))
+      h = Math.max(60, Math.round(h * ratio))
+      const x = work.x + Math.round((work.width - w) / 2)
+      const y = work.y + Math.round((work.height - h) / 2)
+
+      const win = new BrowserWindow({
+        width: w,
+        height: h,
+        x,
+        y,
+        frame: false,
+        transparent: false,
+        backgroundColor: '#000000',
+        alwaysOnTop: true,
+        skipTaskbar: true,
+        resizable: false,
+        movable: true,
+        thickFrame: false,
+        hasShadow: true,
+        roundedCorners: true,
+        useContentSize: true,
+        minWidth: 40,
+        minHeight: 30,
+        webPreferences: {
+          preload: path.join(__dirname, 'preload.js'),
+          contextIsolation: true,
+          nodeIntegration: false
+        }
+      })
+      win.setAlwaysOnTop(true, 'screen-saver')
+      pinnedWindows.add(win)
+      pinnedWindowImages.set(win, imageData)
+      win.on('closed', () => {
+        pinnedWindows.delete(win)
+      })
+      if (VITE_DEV_SERVER_URL) {
+        win.loadURL(`${VITE_DEV_SERVER_URL}#/pinned`)
+      } else {
+        win.loadFile(path.join(__dirname, '../dist/index.html'), { hash: '/pinned' })
+      }
+      screenshotWindow?.close()
+      return { success: true }
+    } catch (error) {
+      console.error('pin-screenshot failed:', error)
+      return { success: false, error: String(error) }
+    }
+  })
+
+  ipcMain.handle('get-pinned-image', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) return ''
+    return pinnedWindowImages.get(win) || ''
+  })
+
+  ipcMain.handle('close-pinned-window', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (win) {
+      pinnedWindows.delete(win)
+      win.close()
+    }
+  })
+
+  ipcMain.handle('resize-pinned-window', (event, width: number, height: number) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) return
+    const w = Math.max(40, Math.round(width))
+    const h = Math.max(30, Math.round(height))
+    const [x, y] = win.getPosition()
+    win.setBounds({ x, y, width: w, height: h })
+  })
+
+  ipcMain.handle('move-pinned-window', (event, x: number, y: number) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) return
+    const lock = pinnedDragLock.get(win)
+    if (lock) {
+      win.setBounds({ x: Math.round(x), y: Math.round(y), width: lock.width, height: lock.height })
+    } else {
+      win.setPosition(Math.round(x), Math.round(y))
+    }
+  })
+
+  ipcMain.handle('get-pinned-bounds', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) return null
+    const b = win.getBounds()
+    return { x: b.x, y: b.y, width: b.width, height: b.height }
+  })
+
+  ipcMain.handle('move-pinned-by', (event, dx: number, dy: number) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) return
+    const [x, y] = win.getPosition()
+    const lock = pinnedDragLock.get(win)
+    if (lock) {
+      win.setBounds({ x: Math.round(x + dx), y: Math.round(y + dy), width: lock.width, height: lock.height })
+    } else {
+      win.setPosition(Math.round(x + dx), Math.round(y + dy))
+    }
+  })
+
+  ipcMain.handle('pinned-drag-start', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) return
+    const b = win.getBounds()
+    pinnedDragLock.set(win, { width: b.width, height: b.height })
+  })
+
+  ipcMain.handle('pinned-drag-end', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) return
+    pinnedDragLock.delete(win)
+  })
+
+  ipcMain.handle('set-pinned-bounds', (event, x: number, y: number, width: number, height: number) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) return
+    const w = Math.max(40, Math.round(width))
+    const h = Math.max(30, Math.round(height))
+    win.setBounds({ x: Math.round(x), y: Math.round(y), width: w, height: h })
   })
 
   ipcMain.handle('move-panel', (_, x: number, y: number) => {

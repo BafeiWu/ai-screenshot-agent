@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
 import { marked } from 'marked'
+import Tesseract from 'tesseract.js'
 import { useScreenshotStore, type Favorite, type FavoriteMessage } from '../store/screenshot'
 
 marked.setOptions({
@@ -30,6 +31,29 @@ let viewerDragStartX = 0
 let viewerDragStartY = 0
 let viewerOffsetStartX = 0
 let viewerOffsetStartY = 0
+
+interface OcrWord {
+  text: string
+  left: number
+  top: number
+  width: number
+  height: number
+  lineId: number
+  wordIndex: number
+}
+const ocrWords = ref<OcrWord[]>([])
+const ocrImageSize = ref<{ w: number; h: number }>({ w: 0, h: 0 })
+const ocrLoading = ref(false)
+const ocrProgress = ref(0)
+const ocrEnabled = ref(false)
+const ocrSelectedIds = ref<Set<string>>(new Set())
+const ocrToast = ref('')
+let ocrToastTimer: ReturnType<typeof setTimeout> | null = null
+const viewerImageEl = ref<HTMLImageElement | null>(null)
+const ocrRenderedSize = ref<{ w: number; h: number; offsetX: number; offsetY: number }>({ w: 0, h: 0, offsetX: 0, offsetY: 0 })
+const ocrSelecting = ref(false)
+const ocrSelectStart = ref<{ x: number; y: number } | null>(null)
+const ocrSelectRect = ref<{ x: number; y: number; w: number; h: number } | null>(null)
 const showHistory = ref(false)
 const isFullscreen = ref(false)
 const screenshotHotkey = ref('Alt+S')
@@ -508,6 +532,10 @@ const openImageViewer = (src: string) => {
   viewerZoom.value = 1
   viewerOffsetX.value = 0
   viewerOffsetY.value = 0
+  ocrEnabled.value = false
+  ocrWords.value = []
+  ocrSelectedIds.value = new Set()
+  ocrSelectRect.value = null
   showImageViewer.value = true
 }
 
@@ -517,9 +545,303 @@ const closeImageViewer = () => {
   viewerZoom.value = 1
   viewerOffsetX.value = 0
   viewerOffsetY.value = 0
+  ocrEnabled.value = false
+  ocrWords.value = []
+  ocrSelectedIds.value = new Set()
+  ocrSelectRect.value = null
+}
+
+const showOcrToast = (text: string) => {
+  ocrToast.value = text
+  if (ocrToastTimer) clearTimeout(ocrToastTimer)
+  ocrToastTimer = setTimeout(() => {
+    ocrToast.value = ''
+  }, 1600)
+}
+
+const updateOcrRenderedSize = () => {
+  const img = viewerImageEl.value
+  if (!img) return
+  const rect = img.getBoundingClientRect()
+  const overlay = img.parentElement?.getBoundingClientRect()
+  ocrRenderedSize.value = {
+    w: rect.width,
+    h: rect.height,
+    offsetX: overlay ? rect.left - overlay.left : 0,
+    offsetY: overlay ? rect.top - overlay.top : 0
+  }
+}
+
+const runOcr = async () => {
+  if (!viewerImage.value || ocrLoading.value) return
+  if (ocrEnabled.value) {
+    ocrEnabled.value = false
+    ocrSelectedIds.value = new Set()
+    ocrSelectRect.value = null
+    return
+  }
+  viewerZoom.value = 1
+  viewerOffsetX.value = 0
+  viewerOffsetY.value = 0
+  ocrLoading.value = true
+  ocrProgress.value = 0
+  try {
+    const result = await Tesseract.recognize(viewerImage.value, 'chi_sim+eng', {
+      logger: (m: any) => {
+        if (m.status === 'recognizing text' && typeof m.progress === 'number') {
+          ocrProgress.value = Math.round(m.progress * 100)
+        }
+      }
+    })
+    const data: any = result.data
+    ocrImageSize.value = {
+      w: data.imageWidth || (data as any).width || 0,
+      h: data.imageHeight || (data as any).height || 0
+    }
+    if (!ocrImageSize.value.w || !ocrImageSize.value.h) {
+      const probe = new Image()
+      await new Promise<void>((resolve) => {
+        probe.onload = () => resolve()
+        probe.onerror = () => resolve()
+        probe.src = viewerImage.value
+      })
+      ocrImageSize.value = { w: probe.naturalWidth, h: probe.naturalHeight }
+    }
+    const words: OcrWord[] = []
+    let lineId = 0
+    let wordIndex = 0
+    const collectFromLines = (lines: any[]) => {
+      for (const line of lines) {
+        const lineWords = line.words || []
+        for (const w of lineWords) {
+          if (!w.text || !w.text.trim()) continue
+          const bbox = w.bbox || {}
+          words.push({
+            text: w.text,
+            left: bbox.x0 ?? 0,
+            top: bbox.y0 ?? 0,
+            width: (bbox.x1 ?? 0) - (bbox.x0 ?? 0),
+            height: (bbox.y1 ?? 0) - (bbox.y0 ?? 0),
+            lineId,
+            wordIndex: wordIndex++
+          })
+        }
+        lineId++
+      }
+    }
+    if (data.blocks && data.blocks.length) {
+      for (const block of data.blocks) {
+        for (const para of (block.paragraphs || [])) {
+          collectFromLines(para.lines || [])
+        }
+      }
+    } else if (data.lines) {
+      collectFromLines(data.lines)
+    } else if (data.words) {
+      for (const w of data.words) {
+        if (!w.text || !w.text.trim()) continue
+        const bbox = w.bbox || {}
+        words.push({
+          text: w.text,
+          left: bbox.x0 ?? 0,
+          top: bbox.y0 ?? 0,
+          width: (bbox.x1 ?? 0) - (bbox.x0 ?? 0),
+          height: (bbox.y1 ?? 0) - (bbox.y0 ?? 0),
+          lineId: 0,
+          wordIndex: wordIndex++
+        })
+      }
+    }
+    ocrWords.value = words
+    ocrEnabled.value = true
+    ocrSelectedIds.value = new Set()
+    await nextTick()
+    updateOcrRenderedSize()
+    if (words.length === 0) {
+      showOcrToast('未识别到文字')
+    } else {
+      showOcrToast(`识别到 ${words.length} 个文字块`)
+    }
+  } catch (err) {
+    console.error('OCR failed:', err)
+    showOcrToast('识别失败')
+  } finally {
+    ocrLoading.value = false
+  }
+}
+
+const ocrWordKey = (w: OcrWord) => `${w.lineId}-${w.wordIndex}`
+
+const ocrWordStyle = (w: OcrWord) => {
+  const sw = ocrImageSize.value.w
+  const sh = ocrImageSize.value.h
+  if (!sw || !sh) return { display: 'none' }
+  const scaleX = ocrRenderedSize.value.w / sw
+  const scaleY = ocrRenderedSize.value.h / sh
+  return {
+    left: `${ocrRenderedSize.value.offsetX + w.left * scaleX}px`,
+    top: `${ocrRenderedSize.value.offsetY + w.top * scaleY}px`,
+    width: `${w.width * scaleX}px`,
+    height: `${w.height * scaleY}px`
+  }
+}
+
+const handleOcrSelectStart = (e: MouseEvent) => {
+  if (!ocrEnabled.value) return
+  if (e.button !== 0) return
+  e.preventDefault()
+  e.stopPropagation()
+  const overlay = (e.currentTarget as HTMLElement).getBoundingClientRect()
+  const x = e.clientX - overlay.left
+  const y = e.clientY - overlay.top
+  ocrSelecting.value = true
+  ocrSelectStart.value = { x, y }
+  ocrSelectRect.value = { x, y, w: 0, h: 0 }
+  if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
+    ocrSelectedIds.value = new Set()
+  }
+  window.addEventListener('mousemove', handleOcrSelectMove)
+  window.addEventListener('mouseup', handleOcrSelectEnd)
+}
+
+const handleOcrSelectMove = (e: MouseEvent) => {
+  if (!ocrSelecting.value || !ocrSelectStart.value) return
+  const overlay = document.querySelector('.ocr-overlay') as HTMLElement | null
+  if (!overlay) return
+  const rect = overlay.getBoundingClientRect()
+  const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left))
+  const y = Math.max(0, Math.min(rect.height, e.clientY - rect.top))
+  const sx = ocrSelectStart.value.x
+  const sy = ocrSelectStart.value.y
+  ocrSelectRect.value = {
+    x: Math.min(x, sx),
+    y: Math.min(y, sy),
+    w: Math.abs(x - sx),
+    h: Math.abs(y - sy)
+  }
+  computeOcrSelection()
+}
+
+const handleOcrSelectEnd = () => {
+  ocrSelecting.value = false
+  ocrSelectRect.value = null
+  window.removeEventListener('mousemove', handleOcrSelectMove)
+  window.removeEventListener('mouseup', handleOcrSelectEnd)
+}
+
+const computeOcrSelection = () => {
+  const r = ocrSelectRect.value
+  if (!r) return
+  const sw = ocrImageSize.value.w
+  const sh = ocrImageSize.value.h
+  if (!sw || !sh) return
+  const scaleX = ocrRenderedSize.value.w / sw
+  const scaleY = ocrRenderedSize.value.h / sh
+  const next = new Set<string>()
+  for (const w of ocrWords.value) {
+    const wx = ocrRenderedSize.value.offsetX + w.left * scaleX
+    const wy = ocrRenderedSize.value.offsetY + w.top * scaleY
+    const ww = w.width * scaleX
+    const wh = w.height * scaleY
+    const cx = wx + ww / 2
+    const cy = wy + wh / 2
+    if (cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h) {
+      next.add(ocrWordKey(w))
+    }
+  }
+  ocrSelectedIds.value = next
+}
+
+const toggleOcrWord = (w: OcrWord, e: MouseEvent) => {
+  if (!ocrEnabled.value) return
+  e.stopPropagation()
+  const key = ocrWordKey(w)
+  const next = new Set(ocrSelectedIds.value)
+  if (e.shiftKey || e.ctrlKey || e.metaKey) {
+    if (next.has(key)) next.delete(key)
+    else next.add(key)
+  } else {
+    if (next.size === 1 && next.has(key)) {
+      next.clear()
+    } else {
+      next.clear()
+      next.add(key)
+    }
+  }
+  ocrSelectedIds.value = next
+}
+
+const ocrSelectAll = () => {
+  const next = new Set<string>()
+  for (const w of ocrWords.value) next.add(ocrWordKey(w))
+  ocrSelectedIds.value = next
+}
+
+const buildOcrSelectedText = (): string => {
+  if (ocrSelectedIds.value.size === 0) return ''
+  const selected = ocrWords.value.filter((w: OcrWord) => ocrSelectedIds.value.has(ocrWordKey(w)))
+  selected.sort((a: OcrWord, b: OcrWord) => a.lineId - b.lineId || a.wordIndex - b.wordIndex)
+  const lines: string[] = []
+  let currentLine = -1
+  let buffer: string[] = []
+  for (const w of selected) {
+    if (w.lineId !== currentLine) {
+      if (buffer.length) lines.push(buffer.join(' '))
+      buffer = [w.text]
+      currentLine = w.lineId
+    } else {
+      buffer.push(w.text)
+    }
+  }
+  if (buffer.length) lines.push(buffer.join(' '))
+  return lines.join('\n').replace(/\s+([，。！？、；：）】」』])/g, '$1').replace(/([（【「『])\s+/g, '$1')
+}
+
+const copyOcrSelection = async () => {
+  const text = buildOcrSelectedText()
+  if (!text) {
+    showOcrToast('请先选择文字')
+    return
+  }
+  try {
+    await navigator.clipboard.writeText(text)
+    showOcrToast('已复制')
+  } catch (err) {
+    console.error('复制失败:', err)
+    showOcrToast('复制失败')
+  }
+}
+
+const copyAllOcrText = async () => {
+  if (ocrWords.value.length === 0) {
+    showOcrToast('暂无识别内容')
+    return
+  }
+  const lines: string[] = []
+  let currentLine = -1
+  let buffer: string[] = []
+  for (const w of [...ocrWords.value].sort((a: OcrWord, b: OcrWord) => a.lineId - b.lineId || a.wordIndex - b.wordIndex)) {
+    if (w.lineId !== currentLine) {
+      if (buffer.length) lines.push(buffer.join(' '))
+      buffer = [w.text]
+      currentLine = w.lineId
+    } else {
+      buffer.push(w.text)
+    }
+  }
+  if (buffer.length) lines.push(buffer.join(' '))
+  const text = lines.join('\n')
+  try {
+    await navigator.clipboard.writeText(text)
+    showOcrToast('已复制全部文字')
+  } catch (err) {
+    console.error('复制失败:', err)
+    showOcrToast('复制失败')
+  }
 }
 
 const handleViewerWheel = (e: WheelEvent) => {
+  if (ocrEnabled.value) return
   e.preventDefault()
   const target = e.currentTarget as HTMLElement
   const rect = target.getBoundingClientRect()
@@ -750,6 +1072,7 @@ const handlePanelKeyDown = (e: KeyboardEvent) => {
 onMounted(async () => {
   window.addEventListener('keydown', handlePanelKeyDown)
   window.addEventListener('click', handleGlobalClick)
+  window.addEventListener('resize', updateOcrRenderedSize)
   await loadHotkeyFromSettings()
   await loadFavorites()
   
@@ -882,6 +1205,7 @@ onMounted(async () => {
 onUnmounted(() => {
   window.removeEventListener('keydown', handlePanelKeyDown)
   window.removeEventListener('click', handleGlobalClick)
+  window.removeEventListener('resize', updateOcrRenderedSize)
 })
 </script>
 
@@ -1164,16 +1488,46 @@ onUnmounted(() => {
     >
       <div
         class="image-viewer-content"
-        :class="{ dragging: viewerDragging }"
+        :class="{ dragging: viewerDragging, 'ocr-mode': ocrEnabled }"
         @click.stop
-        @mousedown="handleViewerMouseDown"
+        @mousedown="ocrEnabled ? null : handleViewerMouseDown($event)"
       >
         <img
+          ref="viewerImageEl"
           :src="viewerImage"
           class="viewer-image"
           :style="{ transform: `translate(${viewerOffsetX}px, ${viewerOffsetY}px) scale(${viewerZoom})` }"
           draggable="false"
+          @load="updateOcrRenderedSize"
         />
+        <div
+          v-if="ocrEnabled && ocrWords.length"
+          class="ocr-overlay"
+          @mousedown="handleOcrSelectStart"
+        >
+          <div
+            v-for="w in ocrWords"
+            :key="ocrWordKey(w)"
+            class="ocr-word"
+            :class="{ selected: ocrSelectedIds.has(ocrWordKey(w)) }"
+            :style="ocrWordStyle(w)"
+            @mousedown.stop
+            @click="toggleOcrWord(w, $event)"
+            :title="w.text"
+          >
+            <span class="ocr-word-text">{{ w.text }}</span>
+          </div>
+          <div
+            v-if="ocrSelectRect"
+            class="ocr-marquee"
+            :style="{ left: `${ocrSelectRect.x}px`, top: `${ocrSelectRect.y}px`, width: `${ocrSelectRect.w}px`, height: `${ocrSelectRect.h}px` }"
+          ></div>
+        </div>
+        <div v-if="ocrLoading" class="ocr-loading">
+          <div class="ocr-spinner"></div>
+          <div class="ocr-loading-text">正在识别文字 {{ ocrProgress }}%</div>
+        </div>
+        <div v-if="ocrToast" class="ocr-toast">{{ ocrToast }}</div>
       </div>
       <div class="viewer-toolbar" @click.stop>
         <button class="viewer-tool-btn" @click="viewerZoomOut" title="缩小">
@@ -1192,6 +1546,38 @@ onUnmounted(() => {
             <path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
         </button>
+        <div class="viewer-toolbar-divider"></div>
+        <button
+          class="viewer-tool-btn ocr-toggle"
+          :class="{ active: ocrEnabled, loading: ocrLoading }"
+          @click="runOcr"
+          :disabled="ocrLoading"
+          :title="ocrEnabled ? '退出文字识别' : '识别文字 (OCR)'"
+        >
+          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M4 7V5a1 1 0 0 1 1-1h2M20 7V5a1 1 0 0 0-1-1h-2M4 17v2a1 1 0 0 0 1 1h2M20 17v2a1 1 0 0 1-1 1h-2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+            <path d="M7 9h2v6H7zM11 9h2v6h-2zM15 9h2v6h-2z" fill="currentColor"/>
+          </svg>
+        </button>
+        <template v-if="ocrEnabled">
+          <button class="viewer-tool-btn" @click="ocrSelectAll" title="全选文字">
+            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect x="4" y="4" width="16" height="16" rx="2" stroke="currentColor" stroke-width="1.8"/>
+              <path d="M8 12l3 3 5-6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+          <button class="viewer-tool-btn" @click="copyOcrSelection" :disabled="ocrSelectedIds.size === 0" title="复制所选">
+            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect x="8" y="8" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.8"/>
+              <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+            </svg>
+          </button>
+          <button class="viewer-tool-btn" @click="copyAllOcrText" title="复制全部文字">
+            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M4 6h16M4 12h16M4 18h10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+            </svg>
+          </button>
+        </template>
       </div>
       <button class="viewer-close" @click="closeImageViewer" title="关闭">
         <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -2280,6 +2666,147 @@ onUnmounted(() => {
 
 .dialog-footer .btn-confirm:disabled {
   opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.image-viewer-content.ocr-mode {
+  cursor: default;
+}
+
+.image-viewer-content.ocr-mode .viewer-image {
+  transition: none;
+  user-select: none;
+}
+
+.ocr-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  pointer-events: auto;
+  cursor: crosshair;
+  user-select: none;
+}
+
+.ocr-word {
+  position: absolute;
+  border: 1px solid rgba(56, 189, 248, 0.45);
+  background: rgba(56, 189, 248, 0.08);
+  cursor: text;
+  overflow: hidden;
+  transition: background 0.1s, border-color 0.1s;
+  box-sizing: border-box;
+}
+
+.ocr-word:hover {
+  background: rgba(56, 189, 248, 0.18);
+  border-color: rgba(56, 189, 248, 0.85);
+}
+
+.ocr-word.selected {
+  background: rgba(233, 69, 96, 0.32);
+  border-color: rgba(233, 69, 96, 0.95);
+  box-shadow: 0 0 0 1px rgba(233, 69, 96, 0.6) inset;
+}
+
+.ocr-word-text {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  color: transparent;
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.ocr-marquee {
+  position: absolute;
+  border: 1px dashed rgba(255, 255, 255, 0.9);
+  background: rgba(255, 255, 255, 0.08);
+  pointer-events: none;
+  box-sizing: border-box;
+}
+
+.ocr-loading {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 18px 26px;
+  background: rgba(20, 24, 40, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  color: #fff;
+  z-index: 5;
+  backdrop-filter: blur(8px);
+}
+
+.ocr-spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid rgba(255, 255, 255, 0.18);
+  border-top-color: #e94560;
+  border-radius: 50%;
+  animation: ocrSpin 0.8s linear infinite;
+}
+
+@keyframes ocrSpin {
+  to { transform: rotate(360deg); }
+}
+
+.ocr-loading-text {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.ocr-toast {
+  position: absolute;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 8px 14px;
+  background: rgba(20, 24, 40, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  color: #fff;
+  font-size: 12px;
+  z-index: 6;
+  backdrop-filter: blur(8px);
+  animation: ocrToastIn 0.18s ease-out;
+}
+
+@keyframes ocrToastIn {
+  from { opacity: 0; transform: translate(-50%, -8px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+.viewer-toolbar-divider {
+  width: 1px;
+  height: 18px;
+  background: rgba(255, 255, 255, 0.18);
+  margin: 0 4px;
+}
+
+.viewer-tool-btn.ocr-toggle.active {
+  background: rgba(233, 69, 96, 0.35);
+  color: #fff;
+}
+
+.viewer-tool-btn.ocr-toggle.loading {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.viewer-tool-btn:disabled {
+  opacity: 0.4;
   cursor: not-allowed;
 }
 </style>

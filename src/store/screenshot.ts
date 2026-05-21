@@ -222,6 +222,17 @@ declare global {
       toggleFullscreen: () => Promise<void>
       openSettingsFromScreenshot: () => Promise<void>
       exitScreenshot: () => Promise<void>
+      writeClipboardText: (text: string) => Promise<{ success: boolean; error?: string }>
+      pinScreenshot: (imageData: string) => Promise<{ success: boolean; error?: string }>
+      getPinnedImage: () => Promise<string>
+      closePinnedWindow: () => Promise<void>
+      resizePinnedWindow: (width: number, height: number) => Promise<void>
+      movePinnedWindow: (x: number, y: number) => Promise<void>
+      getPinnedBounds: () => Promise<{ x: number; y: number; width: number; height: number } | null>
+      movePinnedBy: (dx: number, dy: number) => Promise<void>
+      pinnedDragStart: () => Promise<void>
+      pinnedDragEnd: () => Promise<void>
+      setPinnedBounds: (x: number, y: number, width: number, height: number) => Promise<void>
     }
   }
 }

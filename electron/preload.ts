@@ -49,6 +49,39 @@ contextBridge.exposeInMainWorld('electronAPI', {
   exitScreenshot: () =>
     ipcRenderer.invoke('exit-screenshot'),
 
+  writeClipboardText: (text: string) =>
+    ipcRenderer.invoke('write-clipboard-text', text),
+
+  pinScreenshot: (imageData: string) =>
+    ipcRenderer.invoke('pin-screenshot', imageData),
+
+  getPinnedImage: () =>
+    ipcRenderer.invoke('get-pinned-image'),
+
+  closePinnedWindow: () =>
+    ipcRenderer.invoke('close-pinned-window'),
+
+  resizePinnedWindow: (width: number, height: number) =>
+    ipcRenderer.invoke('resize-pinned-window', width, height),
+
+  movePinnedWindow: (x: number, y: number) =>
+    ipcRenderer.invoke('move-pinned-window', x, y),
+
+  getPinnedBounds: () =>
+    ipcRenderer.invoke('get-pinned-bounds'),
+
+  movePinnedBy: (dx: number, dy: number) =>
+    ipcRenderer.invoke('move-pinned-by', dx, dy),
+
+  pinnedDragStart: () =>
+    ipcRenderer.invoke('pinned-drag-start'),
+
+  pinnedDragEnd: () =>
+    ipcRenderer.invoke('pinned-drag-end'),
+
+  setPinnedBounds: (x: number, y: number, width: number, height: number) =>
+    ipcRenderer.invoke('set-pinned-bounds', x, y, width, height),
+
   openSettingsFromScreenshot: () =>
     ipcRenderer.invoke('open-settings-from-screenshot'),
 

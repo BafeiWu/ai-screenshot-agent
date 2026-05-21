@@ -3,6 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import Panel from './components/Panel.vue'
 import Settings from './components/Settings.vue'
 import SnipScreenshot from './components/SnipScreenshot.vue'
+import PinnedImage from './components/PinnedImage.vue'
 
 const currentRoute = ref(window.location.hash || '#/panel')
 
@@ -19,6 +20,7 @@ onMounted(() => {
 const isPanel = computed(() => currentRoute.value === '#/panel' || currentRoute.value === '#/')
 const isSettings = computed(() => currentRoute.value === '#/settings')
 const isScreenshot = computed(() => currentRoute.value === '#/screenshot' || currentRoute.value.startsWith('#/screenshot'))
+const isPinned = computed(() => currentRoute.value === '#/pinned' || currentRoute.value.startsWith('#/pinned'))
 
 const closeSettings = () => {
   window.location.hash = '/panel'
@@ -26,7 +28,8 @@ const closeSettings = () => {
 </script>
 
 <template>
-  <SnipScreenshot v-if="isScreenshot" />
+  <PinnedImage v-if="isPinned" />
+  <SnipScreenshot v-else-if="isScreenshot" />
   <Panel v-else-if="isPanel" />
   <Settings v-else-if="isSettings" />
   <div v-else style="padding: 20px; color: white;">
