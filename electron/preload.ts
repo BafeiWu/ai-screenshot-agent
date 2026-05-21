@@ -61,6 +61,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getApiKey: () =>
     ipcRenderer.invoke('get-api-key'),
 
+  getPendingScreenshot: () =>
+    ipcRenderer.invoke('get-pending-screenshot'),
+
   getVersion: () =>
     ipcRenderer.invoke('get-version'),
 

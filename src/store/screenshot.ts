@@ -40,7 +40,8 @@ export const useScreenshotStore = defineStore('screenshot', () => {
     userMessage: string,
     history: Message[] = [],
     imageData?: string,
-    onToken?: (token: string) => void
+    onToken?: (token: string) => void,
+    signal?: AbortSignal
   ): Promise<string> => {
     const image = imageData || currentImage.value
 
@@ -104,7 +105,8 @@ export const useScreenshotStore = defineStore('screenshot', () => {
           model: apiModel,
           messages: messages,
           stream: true
-        })
+        }),
+        signal
       })
 
       if (!response.ok) {
@@ -122,8 +124,16 @@ export const useScreenshotStore = defineStore('screenshot', () => {
       let fullContent = ''
 
       while (true) {
+        if (signal?.aborted) {
+          try { await reader.cancel() } catch {}
+          throw new DOMException('Aborted', 'AbortError')
+        }
         const { done, value } = await reader.read()
         if (done) break
+        if (signal?.aborted) {
+          try { await reader.cancel() } catch {}
+          throw new DOMException('Aborted', 'AbortError')
+        }
 
         const chunk = decoder.decode(value, { stream: true })
         const lines = chunk.split('\n')
@@ -150,6 +160,9 @@ export const useScreenshotStore = defineStore('screenshot', () => {
 
       return fullContent || 'AI 未能返回有效回答'
     } catch (error) {
+      if ((error as any)?.name === 'AbortError' || signal?.aborted) {
+        throw error
+      }
       console.error('AI API Error:', error)
       return 'AI 服务暂时不可用: ' + (error as Error).message
     }
@@ -192,6 +205,7 @@ declare global {
       movePanel: (x: number, y: number) => Promise<void>
       getPanelPosition: () => Promise<[number, number]>
       getApiKey: () => Promise<string>
+      getPendingScreenshot: () => Promise<string>
       getVersion: () => Promise<string>
       checkForUpdates: () => Promise<{ updateAvailable: boolean; version: string; notes: string }>
       downloadUpdate: () => Promise<{ success: boolean; error?: string }>

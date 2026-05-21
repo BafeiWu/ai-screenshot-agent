@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { useScreenshotStore } from '../store/screenshot'
 
 type Mode = 'select' | 'annotate'
 type Tool = 'pen' | 'rect' | 'arrow'
@@ -11,6 +12,13 @@ interface Annotation {
   width: number
   points: Point[]
 }
+
+interface TranslationLine {
+  original: string
+  translation: string
+}
+
+const store = useScreenshotStore()
 
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 const backgroundImage = ref<HTMLImageElement | null>(null)
@@ -31,29 +39,100 @@ const strokeWidth = ref(4)
 const customPrompt = ref('')
 const newChat = ref(false)
 
+const isTranslating = ref(false)
+const translateResult = ref<TranslationLine[]>([])
+const translateError = ref('')
+const showTranslatePanel = ref(false)
+let translateAbortController: AbortController | null = null
+
+const copiedFlash = ref(false)
+let copiedFlashTimer: ReturnType<typeof setTimeout> | null = null
+
+const annotToolbarRef = ref<HTMLElement | null>(null)
+const annotToolbarSize = ref({ w: 520, h: 44 })
+const translatePanelRef = ref<HTMLElement | null>(null)
+const translatePanelSize = ref({ w: 360, h: 120 })
+let annotResizeObserver: ResizeObserver | null = null
+let translateResizeObserver: ResizeObserver | null = null
+const BOTTOM_SAFE = 130
+
 const PRESET_COLORS = ['#ff3b30', '#ff9500', '#ffcc00', '#34c759', '#0a84ff', '#ffffff', '#000000']
 const WIDTHS = [2, 4, 7]
 
 const hasSelection = computed(() => selection.value.width > 5 && selection.value.height > 5)
 
 const annotationToolbarStyle = computed(() => {
-  if (!hasSelection.value || mode.value !== 'annotate') return { display: 'none' as const }
+  const visible = hasSelection.value && mode.value === 'annotate'
   const s = selection.value
   const vw = window.innerWidth
   const vh = window.innerHeight
-  const tbW = 440
-  const tbH = 44
+  const tbW = annotToolbarSize.value.w
+  const tbH = annotToolbarSize.value.h
   const gap = 8
 
-  let top = s.y + s.height + gap
-  let left = s.x + s.width - tbW
-  if (top + tbH > vh - 90) {
-    top = s.y - tbH - gap
-    if (top < 8) top = s.y + gap
+  let top: number
+  let left = s.x + (s.width - tbW) / 2
+
+  if (visible) {
+    if (s.y + s.height + gap + tbH <= vh - BOTTOM_SAFE) {
+      top = s.y + s.height + gap
+    } else if (s.y - tbH - gap >= 8) {
+      top = s.y - tbH - gap
+    } else {
+      top = Math.max(8, Math.min(s.y + s.height - tbH - gap, vh - BOTTOM_SAFE - tbH))
+    }
+  } else {
+    top = -9999
   }
+
   if (left < 8) left = 8
   if (left + tbW > vw - 8) left = vw - tbW - 8
-  return { top: top + 'px', left: left + 'px' }
+
+  return {
+    top: top + 'px',
+    left: left + 'px',
+    visibility: visible ? ('visible' as const) : ('hidden' as const),
+    pointerEvents: visible ? ('auto' as const) : ('none' as const)
+  }
+})
+
+const translatePanelStyle = computed(() => {
+  const visible = showTranslatePanel.value && hasSelection.value
+  const s = selection.value
+  const vw = window.innerWidth
+  const vh = window.innerHeight
+  const panelW = Math.max(320, Math.min(Math.max(s.width, 360), 720))
+  const panelH = translatePanelSize.value.h
+  const annotH = mode.value === 'annotate' ? annotToolbarSize.value.h + 24 : 0
+  const gap = 16
+
+  let left = s.x + (s.width - panelW) / 2
+  let top: number
+
+  if (visible) {
+    const idealTop = s.y + s.height + gap + annotH
+    if (idealTop + Math.min(panelH, 200) <= vh - BOTTOM_SAFE) {
+      top = idealTop
+    } else if (s.y - gap - Math.min(panelH, 320) >= 8) {
+      top = s.y - gap - Math.min(panelH, 320)
+    } else {
+      top = Math.max(8, vh - BOTTOM_SAFE - Math.min(panelH, 320))
+    }
+  } else {
+    top = -9999
+  }
+
+  if (left < 8) left = 8
+  if (left + panelW > vw - 8) left = vw - panelW - 8
+
+  return {
+    top: top + 'px',
+    left: left + 'px',
+    width: panelW + 'px',
+    maxHeight: '320px',
+    visibility: visible ? ('visible' as const) : ('hidden' as const),
+    pointerEvents: visible ? ('auto' as const) : ('none' as const)
+  }
 })
 
 const inSelection = (p: Point) => {
@@ -277,10 +356,139 @@ const clearAnnotations = () => {
 }
 
 const reselect = () => {
+  if (showTranslatePanel.value) closeTranslatePanel()
   annotations.value = []
   selection.value = { x: 0, y: 0, width: 0, height: 0 }
   mode.value = 'select'
   draw()
+}
+
+const buildCroppedDataUrl = (): string | null => {
+  if (!hasSelection.value || !backgroundImage.value) return null
+  const s = selection.value
+  const out = document.createElement('canvas')
+  out.width = s.width
+  out.height = s.height
+  const ctx = out.getContext('2d')
+  if (!ctx) return null
+
+  ctx.drawImage(backgroundImage.value, s.x, s.y, s.width, s.height, 0, 0, s.width, s.height)
+  ctx.save()
+  ctx.translate(-s.x, -s.y)
+  for (const a of annotations.value) drawAnnotation(ctx, a)
+  ctx.restore()
+
+  return out.toDataURL('image/png')
+}
+
+const copyCroppedImage = async () => {
+  if (!hasSelection.value || !backgroundImage.value) return
+  const s = selection.value
+  const out = document.createElement('canvas')
+  out.width = s.width
+  out.height = s.height
+  const ctx = out.getContext('2d')
+  if (!ctx) return
+
+  ctx.drawImage(backgroundImage.value, s.x, s.y, s.width, s.height, 0, 0, s.width, s.height)
+  ctx.save()
+  ctx.translate(-s.x, -s.y)
+  for (const a of annotations.value) drawAnnotation(ctx, a)
+  ctx.restore()
+
+  out.toBlob(async (blob) => {
+    if (!blob) return
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
+      window.electronAPI.exitScreenshot()
+    } catch (e) {
+      console.error('copy image failed', e)
+    }
+  }, 'image/png')
+}
+
+const parseTranslateResponse = (raw: string): TranslationLine[] => {
+  let text = raw.trim()
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i)
+  if (fence) text = fence[1].trim()
+  const start = text.indexOf('[')
+  const end = text.lastIndexOf(']')
+  if (start === -1 || end === -1 || end < start) return []
+  const slice = text.slice(start, end + 1)
+  try {
+    const arr = JSON.parse(slice)
+    if (!Array.isArray(arr)) return []
+    return arr
+      .map((it: any) => ({
+        original: typeof it?.original === 'string' ? it.original : '',
+        translation: typeof it?.translation === 'string' ? it.translation : ''
+      }))
+      .filter(it => it.original || it.translation)
+  } catch {
+    return []
+  }
+}
+
+const translateSelection = async () => {
+  if (!hasSelection.value || isTranslating.value) return
+  const dataUrl = buildCroppedDataUrl()
+  if (!dataUrl) return
+
+  isTranslating.value = true
+  translateError.value = ''
+  translateResult.value = []
+  showTranslatePanel.value = true
+  translateAbortController = new AbortController()
+
+  const prompt = '识别图片中的所有文本，按从上到下、从左到右的阅读顺序，把每一行原文翻译成简体中文。' +
+    '严格只返回 JSON 数组，不要任何解释、前后缀或代码块标记。格式：' +
+    '[{"original":"原文","translation":"中文译文"}]。' +
+    '若图片中没有文字，返回 []。'
+
+  try {
+    const response = await store.sendToAI(
+      prompt,
+      [],
+      dataUrl,
+      undefined,
+      translateAbortController.signal
+    )
+    const lines = parseTranslateResponse(response)
+    if (!lines.length) {
+      translateError.value = '未识别到文字内容'
+    } else {
+      translateResult.value = lines
+    }
+  } catch (error) {
+    if ((error as any)?.name === 'AbortError') {
+      translateError.value = '已取消翻译'
+    } else {
+      translateError.value = '翻译失败：' + ((error as Error).message || '未知错误')
+    }
+  } finally {
+    translateAbortController = null
+    isTranslating.value = false
+  }
+}
+
+const stopTranslate = () => {
+  if (translateAbortController) translateAbortController.abort()
+}
+
+const closeTranslatePanel = () => {
+  if (translateAbortController) translateAbortController.abort()
+  showTranslatePanel.value = false
+  translateResult.value = []
+  translateError.value = ''
+  isTranslating.value = false
+}
+
+const copyTranslations = async () => {
+  if (!translateResult.value.length) return
+  const text = translateResult.value.map((l: TranslationLine) => l.translation).join('\n')
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch {}
 }
 
 const confirmSelection = async () => {
@@ -317,6 +525,10 @@ const openSettings = () => {
 const onKeyDown = (e: KeyboardEvent) => {
   if (e.key === 'Escape') {
     e.preventDefault()
+    if (showTranslatePanel.value) {
+      closeTranslatePanel()
+      return
+    }
     if (mode.value === 'annotate') reselect()
     else cancelScreenshot()
   } else if (e.key === 'Enter' && hasSelection.value) {
@@ -328,10 +540,19 @@ const onKeyDown = (e: KeyboardEvent) => {
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
   newChat.value = false
-  const params = new URLSearchParams(window.location.search)
-  const imageData = params.get('image')
+  let imageData = ''
+  try {
+    imageData = await window.electronAPI.getPendingScreenshot()
+  } catch (e) {
+    imageData = ''
+  }
+  if (!imageData) {
+    const params = new URLSearchParams(window.location.search)
+    imageData = params.get('image') || ''
+    if (imageData) imageData = decodeURIComponent(imageData)
+  }
   if (imageData) {
     const img = new Image()
     img.onload = () => {
@@ -343,13 +564,34 @@ onMounted(() => {
       }
       draw()
     }
-    img.src = decodeURIComponent(imageData)
+    img.src = imageData
   }
   window.addEventListener('keydown', onKeyDown)
+
+  if (annotToolbarRef.value && 'ResizeObserver' in window) {
+    annotResizeObserver = new ResizeObserver(entries => {
+      const r = entries[0]?.contentRect
+      if (r && r.width > 0 && r.height > 0) {
+        annotToolbarSize.value = { w: r.width, h: r.height }
+      }
+    })
+    annotResizeObserver.observe(annotToolbarRef.value)
+  }
+  if (translatePanelRef.value && 'ResizeObserver' in window) {
+    translateResizeObserver = new ResizeObserver(entries => {
+      const r = entries[0]?.contentRect
+      if (r && r.width > 0 && r.height > 0) {
+        translatePanelSize.value = { w: r.width, h: r.height }
+      }
+    })
+    translateResizeObserver.observe(translatePanelRef.value)
+  }
 })
 
 onUnmounted(() => {
   window.removeEventListener('keydown', onKeyDown)
+  annotResizeObserver?.disconnect()
+  translateResizeObserver?.disconnect()
 })
 </script>
 
@@ -364,7 +606,7 @@ onUnmounted(() => {
       @mouseleave="onMouseLeave"
     ></canvas>
 
-    <div class="annot-toolbar" :style="annotationToolbarStyle">
+    <div class="annot-toolbar" ref="annotToolbarRef" :style="annotationToolbarStyle">
       <div class="group">
         <button :class="['tool-btn', { active: tool === 'pen' }]" @click="setTool('pen')" title="画笔">
           <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -427,6 +669,90 @@ onUnmounted(() => {
             <path d="M3 10A9 9 0 0 1 18.5 6.5M21 14a9 9 0 0 1-15.5 3.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
           </svg>
         </button>
+        <button
+          class="tool-btn copy-btn"
+          :class="{ flashed: copiedFlash }"
+          @click="copyCroppedImage"
+          :title="copiedFlash ? '已复制' : '复制截图'"
+        >
+          <svg v-if="!copiedFlash" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" stroke-width="1.7"/>
+            <path d="M5 15V5a2 2 0 0 1 2-2h10" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+          </svg>
+          <svg v-else viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M5 12l5 5L20 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      </div>
+      <div class="divider"></div>
+      <div class="group">
+        <button
+          class="tool-btn translate-btn"
+          @click="translateSelection"
+          :disabled="isTranslating"
+          title="翻译"
+        >
+          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M3 5h10M8 3v2M5.5 5c0 4 2.5 7 5 8.5M11 8c0 3-3.5 6-7 7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M13 21l4-10 4 10M14.5 17h5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span class="translate-label">{{ isTranslating ? '翻译中' : '翻译' }}</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="translate-panel" ref="translatePanelRef" :style="translatePanelStyle" v-show="showTranslatePanel">
+      <div class="translate-panel-header">
+        <span class="translate-panel-title">
+          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M3 5h10M8 3v2M5.5 5c0 4 2.5 7 5 8.5M11 8c0 3-3.5 6-7 7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M13 21l4-10 4 10M14.5 17h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          翻译结果
+        </span>
+        <div class="translate-panel-actions">
+          <button
+            v-if="!isTranslating && translateResult.length"
+            class="translate-action-btn"
+            @click="copyTranslations"
+            title="复制全部译文"
+          >
+            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" stroke-width="1.6"/>
+              <path d="M5 15V5a2 2 0 0 1 2-2h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+            </svg>
+          </button>
+          <button
+            v-if="isTranslating"
+            class="translate-action-btn stop"
+            @click="stopTranslate"
+            title="停止"
+          >
+            <svg viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+              <rect x="6" y="6" width="12" height="12" rx="1.5"/>
+            </svg>
+          </button>
+          <button class="translate-action-btn" @click="closeTranslatePanel" title="关闭">
+            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+      <div class="translate-panel-body">
+        <div v-if="isTranslating && !translateResult.length" class="translate-loading">
+          <div class="dots"><span></span><span></span><span></span></div>
+          <span>正在识别并翻译...</span>
+        </div>
+        <div v-else-if="translateError" class="translate-error">
+          {{ translateError }}
+        </div>
+        <div v-else-if="translateResult.length" class="translate-lines">
+          <div v-for="(line, i) in translateResult" :key="i" class="translate-line">
+            <div class="line-original">{{ line.original }}</div>
+            <div class="line-translation">{{ line.translation }}</div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -652,11 +978,14 @@ onUnmounted(() => {
   color: #fff;
   font-size: 13px;
   outline: none;
-  transition: border-color 0.15s;
+  caret-color: #b85a6b;
+  transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
 }
 
 .prompt-input:focus {
-  border-color: #1e90ff;
+  border-color: #b85a6b;
+  background: rgba(184, 90, 107, 0.12);
+  box-shadow: 0 0 0 2px rgba(184, 90, 107, 0.18);
 }
 
 .prompt-input::placeholder {
@@ -745,5 +1074,192 @@ onUnmounted(() => {
 .btn-confirm:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+.translate-btn {
+  width: auto !important;
+  padding: 0 10px;
+  gap: 6px;
+  background: rgba(184, 90, 107, 0.18);
+  color: #ffb6c4;
+}
+
+.translate-btn:hover:not(:disabled) {
+  background: rgba(184, 90, 107, 0.35) !important;
+  color: #fff !important;
+}
+
+.translate-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.translate-label {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.copy-btn.flashed {
+  background: rgba(52, 199, 89, 0.25) !important;
+  color: #6dd58f !important;
+}
+
+.translate-panel {
+  position: fixed;
+  z-index: 12;
+  display: flex;
+  flex-direction: column;
+  background: rgba(22, 22, 30, 0.97);
+  backdrop-filter: blur(14px);
+  border: 1px solid rgba(184, 90, 107, 0.25);
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+
+.translate-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: rgba(184, 90, 107, 0.12);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.translate-panel-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #ffb6c4;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.translate-panel-title svg {
+  width: 14px;
+  height: 14px;
+}
+
+.translate-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.translate-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  background: transparent;
+  border: none;
+  color: #b0b0c0;
+  cursor: pointer;
+  border-radius: 5px;
+  padding: 0;
+  transition: all 0.15s;
+}
+
+.translate-action-btn svg {
+  width: 13px;
+  height: 13px;
+}
+
+.translate-action-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.translate-action-btn.stop {
+  color: #ff8497;
+}
+
+.translate-panel-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 12px;
+  min-height: 60px;
+}
+
+.translate-loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #b0b0c0;
+  font-size: 13px;
+  padding: 8px 0;
+}
+
+.translate-loading .dots {
+  display: flex;
+  gap: 4px;
+}
+
+.translate-loading .dots span {
+  width: 6px;
+  height: 6px;
+  background: #b85a6b;
+  border-radius: 50%;
+  animation: tdot 1.2s infinite ease-in-out;
+}
+
+.translate-loading .dots span:nth-child(2) { animation-delay: 0.15s; }
+.translate-loading .dots span:nth-child(3) { animation-delay: 0.3s; }
+
+@keyframes tdot {
+  0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-3px); }
+}
+
+.translate-error {
+  color: #ff8497;
+  font-size: 13px;
+  padding: 4px 0;
+}
+
+.translate-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.translate-line {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border-left: 2px solid rgba(184, 90, 107, 0.45);
+  background: rgba(255, 255, 255, 0.02);
+  transition: background 0.15s;
+}
+
+.translate-line:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.line-original {
+  color: #8a8a98;
+  font-size: 12.5px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.line-translation {
+  color: #fff;
+  font-size: 14px;
+  line-height: 1.55;
+  word-break: break-word;
+  font-weight: 500;
+}
+
+.translate-panel-body::-webkit-scrollbar {
+  width: 6px;
+}
+
+.translate-panel-body::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
 }
 </style>

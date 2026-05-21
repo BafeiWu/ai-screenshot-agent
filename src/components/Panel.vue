@@ -1,18 +1,35 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed } from 'vue'
+import { marked } from 'marked'
 import { useScreenshotStore, type Favorite, type FavoriteMessage } from '../store/screenshot'
+
+marked.setOptions({
+  breaks: true,
+  gfm: true
+})
 
 const store = useScreenshotStore()
 const messages = ref<FavoriteMessage[]>([])
 const inputText = ref('')
 const isLoading = ref(false)
 const isStreaming = ref(false)
+let abortController: AbortController | null = null
 const copiedIndex = ref<number | null>(null)
 const isDragging = ref(false)
 const dragStartX = ref(0)
 const dragStartY = ref(0)
 const windowStartX = ref(0)
 const windowStartY = ref(0)
+const showImageViewer = ref(false)
+const viewerImage = ref('')
+const viewerZoom = ref(1)
+const viewerOffsetX = ref(0)
+const viewerOffsetY = ref(0)
+const viewerDragging = ref(false)
+let viewerDragStartX = 0
+let viewerDragStartY = 0
+let viewerOffsetStartX = 0
+let viewerOffsetStartY = 0
 const showHistory = ref(false)
 const isFullscreen = ref(false)
 const screenshotHotkey = ref('Alt+S')
@@ -369,20 +386,25 @@ const sendMessage = async () => {
   messages.value.push({ role: 'assistant', content: '' })
   scrollToBottom()
 
+  const currentInput = inputText.value
+  inputText.value = ''
   isLoading.value = true
   isStreaming.value = false
   const msgIndex = messages.value.length - 1
+  abortController = new AbortController()
+  const signal = abortController.signal
 
   try {
-    const response = await store.sendToAI(inputText.value, messages.value, undefined, (token: string) => {
+    const response = await store.sendToAI(currentInput, messages.value, undefined, (token: string) => {
       isStreaming.value = true
       messages.value[msgIndex].content += token
       scrollToBottom()
-    })
+    }, signal)
     if (response && !messages.value[msgIndex].content) {
       isStreaming.value = true
       const chars = response.split('')
       for (let i = 0; i < chars.length; i++) {
+        if (signal.aborted) break
         messages.value[msgIndex].content += chars[i]
         scrollToBottom()
         await new Promise(r => setTimeout(r, 10))
@@ -390,13 +412,28 @@ const sendMessage = async () => {
     }
     saveToHistory()
   } catch (error) {
-    messages.value[msgIndex].content = '抱歉，AI 服务暂时不可用。'
+    if ((error as any)?.name === 'AbortError' || signal.aborted) {
+      if (!messages.value[msgIndex].content) {
+        messages.value[msgIndex].content = '已停止生成'
+      } else {
+        messages.value[msgIndex].content += '\n\n[已停止生成]'
+      }
+      saveToHistory()
+    } else {
+      messages.value[msgIndex].content = '抱歉，AI 服务暂时不可用。'
+    }
     scrollToBottom()
   }
 
-  inputText.value = ''
+  abortController = null
   isLoading.value = false
   isStreaming.value = false
+}
+
+const stopMessage = () => {
+  if (abortController) {
+    abortController.abort()
+  }
 }
 
 const saveToHistory = async () => {
@@ -466,6 +503,84 @@ const toggleFullscreen = () => {
   isFullscreen.value = !isFullscreen.value
 }
 
+const openImageViewer = (src: string) => {
+  viewerImage.value = src
+  viewerZoom.value = 1
+  viewerOffsetX.value = 0
+  viewerOffsetY.value = 0
+  showImageViewer.value = true
+}
+
+const closeImageViewer = () => {
+  showImageViewer.value = false
+  viewerImage.value = ''
+  viewerZoom.value = 1
+  viewerOffsetX.value = 0
+  viewerOffsetY.value = 0
+}
+
+const handleViewerWheel = (e: WheelEvent) => {
+  e.preventDefault()
+  const target = e.currentTarget as HTMLElement
+  const rect = target.getBoundingClientRect()
+  const cx = rect.left + rect.width / 2
+  const cy = rect.top + rect.height / 2
+  const px = e.clientX - cx
+  const py = e.clientY - cy
+
+  const oldZoom = viewerZoom.value
+  const delta = e.deltaY > 0 ? -0.15 : 0.15
+  const newZoom = Math.min(8, Math.max(0.5, oldZoom * (1 + delta)))
+  if (newZoom === oldZoom) return
+
+  const ratio = newZoom / oldZoom
+  viewerOffsetX.value = (viewerOffsetX.value - px) * ratio + px
+  viewerOffsetY.value = (viewerOffsetY.value - py) * ratio + py
+  viewerZoom.value = newZoom
+}
+
+const handleViewerMouseDown = (e: MouseEvent) => {
+  if (e.button !== 0) return
+  viewerDragging.value = true
+  viewerDragStartX = e.clientX
+  viewerDragStartY = e.clientY
+  viewerOffsetStartX = viewerOffsetX.value
+  viewerOffsetStartY = viewerOffsetY.value
+  window.addEventListener('mousemove', handleViewerMouseMove)
+  window.addEventListener('mouseup', handleViewerMouseUp)
+}
+
+const handleViewerMouseMove = (e: MouseEvent) => {
+  if (!viewerDragging.value) return
+  viewerOffsetX.value = viewerOffsetStartX + (e.clientX - viewerDragStartX)
+  viewerOffsetY.value = viewerOffsetStartY + (e.clientY - viewerDragStartY)
+}
+
+const handleViewerMouseUp = () => {
+  viewerDragging.value = false
+  window.removeEventListener('mousemove', handleViewerMouseMove)
+  window.removeEventListener('mouseup', handleViewerMouseUp)
+}
+
+const viewerZoomIn = () => {
+  viewerZoom.value = Math.min(8, viewerZoom.value * 1.2)
+}
+
+const viewerZoomOut = () => {
+  const next = Math.max(0.5, viewerZoom.value / 1.2)
+  viewerZoom.value = next
+  if (next <= 1) {
+    viewerOffsetX.value = 0
+    viewerOffsetY.value = 0
+  }
+}
+
+const viewerReset = () => {
+  viewerZoom.value = 1
+  viewerOffsetX.value = 0
+  viewerOffsetY.value = 0
+}
+
 const copyToClipboard = async (content: string, index: number) => {
   try {
     await navigator.clipboard.writeText(content)
@@ -479,24 +594,68 @@ const copyToClipboard = async (content: string, index: number) => {
 }
 
 const formatText = (text: string): string => {
-  let formatted = text
+  if (!text) return ''
 
-  formatted = formatted.replace(/\|(.+)\|/g, (match) => {
-    const cells = match.slice(1, -1).split('|')
-    const isHeader = cells.some(cell => cell.trim().startsWith('---'))
-    if (isHeader) return ''
+  let formatted = marked.parse(text, { async: false }) as string
 
-    const row = cells.map(cell => `<td style="padding: 8px; border: 1px solid #3a3a5a;">${cell.trim()}</td>`).join('')
-    return `<tr>${row}</tr>`
+  formatted = formatted.replace(/<tr[^>]*>(\s*<(td|th)[^>]*>\s*<\/(td|th)>\s*)+<\/tr>/g, '')
+
+  formatted = formatted.replace(/<table([^>]*)>([\s\S]*?)<\/table>/g, (_match, attrs, body) => {
+    const toolbar =
+      '<div class="table-toolbar">' +
+        '<span class="table-toolbar-label">表格</span>' +
+        '<div class="table-toolbar-actions">' +
+          '<button class="table-action-btn" onclick="event.stopPropagation(); window.copyTable && window.copyTable(this)" title="复制">' +
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>' +
+          '</button>' +
+          '<button class="table-action-btn" onclick="event.stopPropagation(); window.downloadTable && window.downloadTable(this)" title="下载">' +
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>' +
+          '</button>' +
+          '<button class="table-action-btn" onclick="event.stopPropagation(); window.fullscreenTable && window.fullscreenTable(this)" title="全屏">' +
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>' +
+          '</button>' +
+        '</div>' +
+      '</div>'
+    const styledAttrs = (attrs || '') + ' class="downloadable-table"'
+    return '<div class="table-wrap">' + toolbar + '<div class="table-scroll"><table' + styledAttrs + '>' + body + '</table></div></div>'
   })
 
-  if (formatted.includes('<td')) {
-    formatted = `<table style="border-collapse: collapse; margin: 10px 0; font-size: 13px;">${formatted}</table>`
-  }
-
-  formatted = formatted.replace(/\n/g, '<br>')
+  formatted = formatted.replace(/<a /g, '<a style="color:#ffffff !important;text-decoration:underline;" target="_blank" rel="noopener noreferrer" ')
 
   return formatted
+}
+
+const hasTable = (text: string): boolean => {
+  if (!text) return false
+  return text.includes('|') && !text.includes('---')
+}
+
+const hasVideo = (text: string): boolean => {
+  if (!text) return false
+  return text.includes('.mp4') || text.includes('.webm') || text.includes('.mov') || text.includes('.avi') || text.includes('video')
+}
+
+const downloadTable = (text: string) => {
+  const lines = text.trim().split('\n')
+  const rows: string[][] = []
+  
+  for (const line of lines) {
+    if (line.trim().startsWith('|') && !line.includes('---')) {
+      const cells = line.split('|').filter(cell => cell.trim() !== '')
+      rows.push(cells.map(cell => cell.trim()))
+    }
+  }
+  
+  if (rows.length === 0) return
+  
+  const csv = rows.map(row => row.map(cell => `"${cell.replace(/"/g, '""')}"`).join(',')).join('\n')
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `table_${Date.now()}.csv`
+  link.click()
+  URL.revokeObjectURL(url)
 }
 
 const toggleHistory = async () => {
@@ -575,6 +734,10 @@ const formatTime = (timestamp: number) => {
 
 const handlePanelKeyDown = (e: KeyboardEvent) => {
   if (e.key === 'Escape') {
+    if (showImageViewer.value) {
+      closeImageViewer()
+      return
+    }
     if (isFullscreen.value) {
       toggleFullscreen()
       return
@@ -589,6 +752,59 @@ onMounted(async () => {
   window.addEventListener('click', handleGlobalClick)
   await loadHotkeyFromSettings()
   await loadFavorites()
+  
+  ;(window as any).copyTable = async (trigger: HTMLElement) => {
+    const wrap = trigger?.closest('.table-wrap')
+    const table = wrap?.querySelector('.downloadable-table') as HTMLElement | null
+    if (table) {
+      await navigator.clipboard.writeText(table.innerText)
+      flashToolbarLabel(wrap as HTMLElement, '已复制')
+    }
+  }
+
+  ;(window as any).downloadTable = (trigger: HTMLElement) => {
+    const wrap = trigger?.closest('.table-wrap')
+    const table = wrap?.querySelector('.downloadable-table') as HTMLElement | null
+    if (!table) return
+    const rows: string[][] = []
+    table.querySelectorAll('tr').forEach((tr) => {
+      const row: string[] = []
+      tr.querySelectorAll('td, th').forEach((cell) => {
+        row.push(`"${(cell as HTMLElement).innerText.replace(/"/g, '""')}"`)
+      })
+      if (row.length > 0) rows.push(row)
+    })
+    const csvContent = '﻿' + rows.map(row => row.join(',')).join('\n')
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
+    const link = document.createElement('a')
+    link.href = URL.createObjectURL(blob)
+    link.download = `table_${Date.now()}.csv`
+    link.click()
+    URL.revokeObjectURL(link.href)
+  }
+
+  ;(window as any).fullscreenTable = (trigger: HTMLElement) => {
+    const wrap = trigger?.closest('.table-wrap') as HTMLElement | null
+    if (!wrap) return
+    if (document.fullscreenElement) {
+      document.exitFullscreen()
+    } else if (wrap.requestFullscreen) {
+      wrap.requestFullscreen()
+    }
+  }
+
+  function flashToolbarLabel(wrap: HTMLElement, text: string) {
+    const label = wrap.querySelector('.table-toolbar-label') as HTMLElement | null
+    if (!label) return
+    const original = label.textContent
+    label.textContent = text
+    label.classList.add('flash')
+    setTimeout(() => {
+      label.textContent = original
+      label.classList.remove('flash')
+    }, 1200)
+  }
+  
   window.electronAPI.onSettingsUpdated((s) => {
     if (s?.screenshotHotkey) screenshotHotkey.value = s.screenshotHotkey
   })
@@ -623,16 +839,20 @@ onMounted(async () => {
     const msgIndex = messages.value.length - 1
     scrollToBottom()
 
+    abortController = new AbortController()
+    const signal = abortController.signal
+
     try {
       const response = await store.sendToAI(prompt, [], data.dataUrl, (token: string) => {
         isStreaming.value = true
         messages.value[msgIndex].content += token
         scrollToBottom()
-      })
+      }, signal)
       if (response && !messages.value[msgIndex].content) {
         isStreaming.value = true
         const chars = response.split('')
         for (let i = 0; i < chars.length; i++) {
+          if (signal.aborted) break
           messages.value[msgIndex].content += chars[i]
           scrollToBottom()
           await new Promise(r => setTimeout(r, 10))
@@ -640,10 +860,20 @@ onMounted(async () => {
       }
       saveToHistory()
     } catch (error) {
-      messages.value[msgIndex].content = '抱歉，AI 服务暂时不可用。'
+      if ((error as any)?.name === 'AbortError' || signal.aborted) {
+        if (!messages.value[msgIndex].content) {
+          messages.value[msgIndex].content = '已停止生成'
+        } else {
+          messages.value[msgIndex].content += '\n\n[已停止生成]'
+        }
+        saveToHistory()
+      } else {
+        messages.value[msgIndex].content = '抱歉，AI 服务暂时不可用。'
+      }
       scrollToBottom()
     }
 
+    abortController = null
     isLoading.value = false
     isStreaming.value = false
   })
@@ -849,7 +1079,7 @@ onUnmounted(() => {
               {{ msg.role === 'user' ? '👤' : '🤖' }}
             </div>
             <div class="message-content" v-if="msg.role === 'user'">
-              <img v-if="msg.image" :src="msg.image" class="message-image" />
+              <img v-if="msg.image" :src="msg.image" class="message-image" @click="openImageViewer(msg.image)" />
               <div v-if="msg.content" v-html="msg.content"></div>
             </div>
             <div class="message-content" v-else-if="!msg.content && isLoading">
@@ -859,12 +1089,23 @@ onUnmounted(() => {
             </div>
             <div class="message-wrapper" v-else>
               <div class="message-content" v-html="formatText(msg.content)"></div>
-              <button
-                class="copy-btn"
-                :class="{ copied: copiedIndex === index }"
-                @click="copyToClipboard(msg.content, index)"
-                :title="copiedIndex === index ? '已复制' : '复制'"
-              >
+              <div class="message-actions">
+                <button
+                  v-if="hasTable(msg.content)"
+                  class="action-btn"
+                  @click="downloadTable(msg.content)"
+                  title="下载表格"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                </button>
+                <button
+                  class="action-btn"
+                  :class="{ copied: copiedIndex === index }"
+                  @click="copyToClipboard(msg.content, index)"
+                  :title="copiedIndex === index ? '已复制' : '复制'"
+                >
                 <svg v-if="copiedIndex !== index" class="copy-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                   <rect x="8" y="8" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.6"/>
                   <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
@@ -873,6 +1114,7 @@ onUnmounted(() => {
                   <path d="M5 12.5L10 17.5L19 7.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
               </button>
+              </div>
             </div>
           </div>
         </div>
@@ -891,13 +1133,72 @@ onUnmounted(() => {
         <img v-if="isCurrentFavorited" src="/favorited.png" alt="已收藏" />
         <img v-else src="/favorite.png" alt="收藏" />
       </button>
-      <button @click="sendMessage" :disabled="isLoading || !inputText.trim() || showHistory || showFavorites">
+      <button
+        v-if="isLoading"
+        class="btn-stop"
+        @click="stopMessage"
+        title="停止生成"
+      >
+        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="7" y="7" width="10" height="10" rx="1.5" fill="currentColor"/>
+        </svg>
+        <span>停止</span>
+      </button>
+      <button
+        v-else
+        @click="sendMessage"
+        :disabled="!inputText.trim() || showHistory || showFavorites"
+      >
         发送
       </button>
     </div>
 
     <div class="resize-handle top-right" @mousedown="startResize('top-right', $event)"></div>
     <div class="resize-handle bottom-right" @mousedown="startResize('bottom-right', $event)"></div>
+
+    <div
+      v-if="showImageViewer"
+      class="image-viewer-overlay"
+      @click.self="closeImageViewer"
+      @wheel="handleViewerWheel"
+    >
+      <div
+        class="image-viewer-content"
+        :class="{ dragging: viewerDragging }"
+        @click.stop
+        @mousedown="handleViewerMouseDown"
+      >
+        <img
+          :src="viewerImage"
+          class="viewer-image"
+          :style="{ transform: `translate(${viewerOffsetX}px, ${viewerOffsetY}px) scale(${viewerZoom})` }"
+          draggable="false"
+        />
+      </div>
+      <div class="viewer-toolbar" @click.stop>
+        <button class="viewer-tool-btn" @click="viewerZoomOut" title="缩小">
+          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <span class="viewer-zoom-label">{{ Math.round(viewerZoom * 100) }}%</span>
+        <button class="viewer-tool-btn" @click="viewerZoomIn" title="放大">
+          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <button class="viewer-tool-btn" @click="viewerReset" title="重置">
+          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      </div>
+      <button class="viewer-close" @click="closeImageViewer" title="关闭">
+        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+      </button>
+    </div>
 
     <div v-if="showFavoriteDialog" class="dialog-overlay" @click.self="showFavoriteDialog = false">
       <div class="dialog">
@@ -1046,13 +1347,10 @@ onUnmounted(() => {
   height: 26px;
   background: transparent;
   border: none;
-  border-radius: 6px;
-  cursor: pointer;
-  padding: 0;
-  flex-shrink: 0;
   color: #8a8aa8;
-  opacity: 0;
-  transition: opacity 0.2s, background 0.2s, color 0.2s;
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 0;
 }
 
 .copy-btn:hover {
@@ -1062,7 +1360,6 @@ onUnmounted(() => {
 
 .copy-btn.copied {
   color: #4ade80;
-  opacity: 1;
 }
 
 .copy-icon {
@@ -1072,6 +1369,54 @@ onUnmounted(() => {
 
 .message-wrapper:hover .copy-btn {
   opacity: 1;
+}
+
+.message-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.message-wrapper {
+  position: relative;
+}
+
+.message.assistant .message-actions {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+}
+
+.message-wrapper:hover .message-actions {
+  opacity: 1;
+}
+
+.action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  background: transparent;
+  border: none;
+  color: #8a8aa8;
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 0;
+}
+
+.action-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.action-btn.copied {
+  color: #4ade80;
 }
 
 .panel-content {
@@ -1298,8 +1643,17 @@ onUnmounted(() => {
 
 .message-image {
   max-width: 100%;
-  border-radius: 8px;
+  border-radius: 10px;
   margin-bottom: 8px;
+  cursor: zoom-in;
+  transition: transform 0.2s, box-shadow 0.2s;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+
+.message-image:hover {
+  transform: scale(1.01);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
 }
 
 .message-content {
@@ -1313,32 +1667,166 @@ onUnmounted(() => {
   overflow-wrap: break-word;
 }
 
+.message-content a {
+  color: #ffffff !important;
+  text-decoration: underline;
+}
+
 .message-content table {
   max-width: 100%;
   border-collapse: collapse;
   margin: 10px 0;
   font-size: 13px;
-  overflow-x: auto;
+}
+
+.message-content table td,
+.message-content table th {
+  padding: 8px 12px;
+  border: 1px solid #3a3a5a;
+  text-align: left;
+}
+
+.message-content table th {
+  background: #1d1d33;
+  font-weight: 600;
+}
+
+.message-content :deep(.table-wrap) {
+  margin: 10px 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.03);
+  white-space: normal;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.message-content :deep(.table-wrap:fullscreen) {
+  background: #0f0f1a;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+}
+
+.message-content :deep(.table-wrap:fullscreen .table-scroll) {
+  flex: 1;
+  overflow: auto;
+}
+
+.message-content :deep(.table-toolbar) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px 6px 14px;
+  background: #1d2844;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.message-content :deep(.table-toolbar-label) {
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.65);
+  letter-spacing: 0.4px;
+  transition: color 0.2s ease;
+}
+
+.message-content :deep(.table-toolbar-label.flash) {
+  color: #4ade80;
+}
+
+.message-content :deep(.table-toolbar-actions) {
+  display: flex;
+  gap: 4px;
+}
+
+.message-content :deep(.table-action-btn) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.75);
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+
+.message-content :deep(.table-action-btn svg) {
+  width: 14px;
+  height: 14px;
   display: block;
 }
 
-.message-content td {
-  padding: 8px 12px;
-  border: 1px solid #3a3a5a;
+.message-content :deep(.table-action-btn:hover) {
+  background: #e94560;
+  border-color: #e94560;
+  color: #ffffff;
 }
 
-.message-content tr:first-child td {
-  background: #2a2a4a;
+.message-content :deep(.table-scroll) {
+  overflow-x: auto;
+}
+
+.message-content :deep(.downloadable-table) {
+  margin: 0;
+  font-size: 13px;
+  border-collapse: collapse;
+  width: 100%;
+  border: none;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.message-content :deep(.downloadable-table td),
+.message-content :deep(.downloadable-table th) {
+  padding: 10px 14px;
+  border: none;
+  border-right: 1px solid rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  text-align: left;
+  vertical-align: top;
+}
+
+.message-content :deep(.downloadable-table td:last-child),
+.message-content :deep(.downloadable-table th:last-child) {
+  border-right: none;
+}
+
+.message-content :deep(.downloadable-table tr:last-child td) {
+  border-bottom: none;
+}
+
+.message-content :deep(.downloadable-table thead th),
+.message-content :deep(.downloadable-table tr:first-child th) {
+  background: #212b47;
+  font-weight: 600;
+  color: #ffffff;
+  letter-spacing: 0.2px;
+}
+
+.message-content :deep(.downloadable-table tbody tr:nth-child(even)) {
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.message-content :deep(.downloadable-table tbody tr:hover) {
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .message.user .message-content {
-  background: #e94560;
+  background: linear-gradient(135deg, #2a3358, #1d2844);
+  border: 1px solid rgba(124, 137, 200, 0.25);
   border-bottom-right-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
 
 .message.assistant .message-content {
   background: #16213e;
   border-bottom-left-radius: 4px;
+  position: relative;
+  padding-right: 40px;
 }
 
 .typing-indicator {
@@ -1418,6 +1906,31 @@ onUnmounted(() => {
 
 .panel-input button:hover:not(:disabled) {
   opacity: 0.9;
+}
+
+.btn-stop {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: linear-gradient(135deg, #2a2f4a, #1d2844);
+  border: 1px solid rgba(233, 69, 96, 0.4);
+  border-radius: 8px;
+  padding: 9px 16px;
+  color: #ff6b8b;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-stop svg {
+  width: 14px;
+  height: 14px;
+}
+
+.btn-stop:hover {
+  background: linear-gradient(135deg, #322a44, #29203a);
+  border-color: rgba(233, 69, 96, 0.7);
+  box-shadow: 0 0 0 2px rgba(233, 69, 96, 0.15);
 }
 
 .resize-handle {
@@ -1556,6 +2069,121 @@ onUnmounted(() => {
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.image-viewer-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.92);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  overflow: hidden;
+}
+
+.image-viewer-content {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+  overflow: hidden;
+}
+
+.image-viewer-content.dragging {
+  cursor: grabbing;
+}
+
+.viewer-image {
+  max-width: 90vw;
+  max-height: 90vh;
+  object-fit: contain;
+  border-radius: 8px;
+  user-select: none;
+  -webkit-user-drag: none;
+  transition: transform 0.05s linear;
+  will-change: transform;
+}
+
+.viewer-toolbar {
+  position: absolute;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  background: rgba(20, 24, 40, 0.85);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  z-index: 2;
+}
+
+.viewer-tool-btn {
+  background: transparent;
+  border: none;
+  color: #fff;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s;
+}
+
+.viewer-tool-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.viewer-tool-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.viewer-zoom-label {
+  color: #fff;
+  font-size: 12px;
+  min-width: 44px;
+  text-align: center;
+  user-select: none;
+}
+
+.viewer-close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.85);
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2;
+  transition: background 0.15s, color 0.15s;
+}
+
+.viewer-close svg {
+  width: 15px;
+  height: 15px;
+}
+
+.viewer-close:hover {
+  background: rgba(255, 255, 255, 0.18);
+  color: #fff;
 }
 
 .dialog-overlay {

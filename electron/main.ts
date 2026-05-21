@@ -50,6 +50,7 @@ let mainWindow: BrowserWindow | null = null
 let panelWindow: BrowserWindow | null = null
 let settingsWindow: BrowserWindow | null = null
 let screenshotWindow: BrowserWindow | null = null
+let pendingScreenshotImage: string = ''
 let tray: Tray | null = null
 
 const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL
@@ -204,6 +205,7 @@ async function createScreenshotWindow() {
     if (sources.length > 0) {
       screenshotImage = sources[0].thumbnail.toDataURL()
     }
+    pendingScreenshotImage = screenshotImage
 
     screenshotWindow = new BrowserWindow({
       width: width,
@@ -227,16 +229,16 @@ async function createScreenshotWindow() {
     screenshotWindow.focus()
 
     if (VITE_DEV_SERVER_URL) {
-      screenshotWindow.loadURL(`${VITE_DEV_SERVER_URL}#/screenshot?image=${encodeURIComponent(screenshotImage)}`)
+      screenshotWindow.loadURL(`${VITE_DEV_SERVER_URL}#/screenshot`)
     } else {
       screenshotWindow.loadFile(path.join(__dirname, '../dist/index.html'), {
-        hash: '/screenshot',
-        query: { image: screenshotImage }
+        hash: '/screenshot'
       })
     }
 
     screenshotWindow.on('closed', () => {
       screenshotWindow = null
+      pendingScreenshotImage = ''
     })
   } catch (error) {
     console.error('Failed to create screenshot window:', error)
@@ -455,6 +457,10 @@ function setupIPC() {
     const data = store.get('favorites', [])
     console.log('[Main] get-favorites:', data)
     return data
+  })
+
+  ipcMain.handle('get-pending-screenshot', () => {
+    return pendingScreenshotImage
   })
 
   ipcMain.handle('save-favorites', (_, favorites: any[]) => {
