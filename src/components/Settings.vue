@@ -163,6 +163,11 @@ const handleSave = async () => {
       plainSettings.apiKey = apiKey.value
     }
     const result = await window.electronAPI.saveSettings(plainSettings)
+    
+    if (apiKey.value) {
+      localStorage.setItem('doubao_api_key', apiKey.value)
+    }
+    
     console.log('Save result:', result)
     if (result && typeof result === 'object' && 'success' in result) {
       if (result.success) {
