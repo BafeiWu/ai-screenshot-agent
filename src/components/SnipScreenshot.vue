@@ -80,6 +80,99 @@ const ocrShown = ref(false)
 const ocrCopiedFlash = ref(false)
 let ocrCopiedFlashTimer: ReturnType<typeof setTimeout> | null = null
 
+type ResizeHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w'
+const isResizing = ref(false)
+const resizeHandle = ref<ResizeHandle | null>(null)
+const resizeStart = ref<{ mx: number; my: number; sx: number; sy: number; sw: number; sh: number } | null>(null)
+
+const HANDLE_DIRS: ResizeHandle[] = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']
+const cursorForHandle = (h: ResizeHandle): string => {
+  switch (h) {
+    case 'nw': case 'se': return 'nwse-resize'
+    case 'ne': case 'sw': return 'nesw-resize'
+    case 'n': case 's': return 'ns-resize'
+    case 'e': case 'w': return 'ew-resize'
+  }
+}
+
+const handlePosition = (h: ResizeHandle): { x: number; y: number } => {
+  const s = selection.value
+  switch (h) {
+    case 'nw': return { x: s.x, y: s.y }
+    case 'ne': return { x: s.x + s.width, y: s.y }
+    case 'sw': return { x: s.x, y: s.y + s.height }
+    case 'se': return { x: s.x + s.width, y: s.y + s.height }
+    case 'n': return { x: s.x + s.width / 2, y: s.y }
+    case 's': return { x: s.x + s.width / 2, y: s.y + s.height }
+    case 'w': return { x: s.x, y: s.y + s.height / 2 }
+    case 'e': return { x: s.x + s.width, y: s.y + s.height / 2 }
+  }
+}
+
+const startResize = (h: ResizeHandle, e: MouseEvent) => {
+  e.preventDefault()
+  e.stopPropagation()
+  isResizing.value = true
+  resizeHandle.value = h
+  resizeStart.value = {
+    mx: e.clientX,
+    my: e.clientY,
+    sx: selection.value.x,
+    sy: selection.value.y,
+    sw: selection.value.width,
+    sh: selection.value.height
+  }
+  window.addEventListener('mousemove', onResizeMove)
+  window.addEventListener('mouseup', onResizeUp)
+}
+
+const onResizeMove = (e: MouseEvent) => {
+  if (!isResizing.value || !resizeHandle.value || !resizeStart.value) return
+  const rs = resizeStart.value
+  const dx = e.clientX - rs.mx
+  const dy = e.clientY - rs.my
+  let nx = rs.sx, ny = rs.sy, nw = rs.sw, nh = rs.sh
+  switch (resizeHandle.value) {
+    case 'nw': nx = rs.sx + dx; ny = rs.sy + dy; nw = rs.sw - dx; nh = rs.sh - dy; break
+    case 'ne': ny = rs.sy + dy; nw = rs.sw + dx; nh = rs.sh - dy; break
+    case 'sw': nx = rs.sx + dx; nw = rs.sw - dx; nh = rs.sh + dy; break
+    case 'se': nw = rs.sw + dx; nh = rs.sh + dy; break
+    case 'n': ny = rs.sy + dy; nh = rs.sh - dy; break
+    case 's': nh = rs.sh + dy; break
+    case 'w': nx = rs.sx + dx; nw = rs.sw - dx; break
+    case 'e': nw = rs.sw + dx; break
+  }
+  if (nw < 0) { nx += nw; nw = -nw }
+  if (nh < 0) { ny += nh; nh = -nh }
+  const canvas = canvasRef.value
+  if (canvas) {
+    if (nx < 0) { nw += nx; nx = 0 }
+    if (ny < 0) { nh += ny; ny = 0 }
+    if (nx + nw > canvas.width) nw = canvas.width - nx
+    if (ny + nh > canvas.height) nh = canvas.height - ny
+  }
+  selection.value = {
+    x: Math.round(nx),
+    y: Math.round(ny),
+    width: Math.max(1, Math.round(nw)),
+    height: Math.max(1, Math.round(nh))
+  }
+  draw()
+}
+
+const onResizeUp = () => {
+  if (!isResizing.value) return
+  isResizing.value = false
+  resizeHandle.value = null
+  resizeStart.value = null
+  window.removeEventListener('mousemove', onResizeMove)
+  window.removeEventListener('mouseup', onResizeUp)
+  if (ocrShown.value || ocrWords.value.length) {
+    resetOcr()
+  }
+  draw()
+}
+
 const PRESET_COLORS = ['#ff3b30', '#ff9500', '#ffcc00', '#34c759', '#0a84ff', '#ffffff', '#000000']
 const WIDTHS = [2, 4, 7]
 
@@ -303,7 +396,10 @@ const onMouseDown = (e: MouseEvent) => {
   cursor.value = p
 
   if (mode.value === 'select') {
-    selection.value = { x: p.x, y: p.y, width: 0, height: 0 }
+    if (hasSelection.value && inSelection(p)) {
+    } else {
+      selection.value = { x: p.x, y: p.y, width: 0, height: 0 }
+    }
   } else if (mode.value === 'annotate' && inSelection(p)) {
     drawingAnnotation.value = {
       tool: tool.value,
@@ -349,7 +445,6 @@ const onMouseUp = () => {
 
   if (mode.value === 'select') {
     if (hasSelection.value) {
-      mode.value = 'annotate'
     } else {
       selection.value = { x: 0, y: 0, width: 0, height: 0 }
     }
@@ -924,6 +1019,8 @@ onMounted(async () => {
 
 onUnmounted(() => {
   window.removeEventListener('keydown', onKeyDown)
+  window.removeEventListener('mousemove', onResizeMove)
+  window.removeEventListener('mouseup', onResizeUp)
   annotResizeObserver?.disconnect()
   translateResizeObserver?.disconnect()
   if (ocrToastTimer) clearTimeout(ocrToastTimer)
@@ -966,6 +1063,21 @@ onUnmounted(() => {
     </div>
 
     <div v-if="ocrToast" class="ocr-toast">{{ ocrToast }}</div>
+
+    <template v-if="hasSelection && !isPointerDown && !ocrSelecting">
+      <div
+        v-for="h in HANDLE_DIRS"
+        :key="h"
+        class="resize-handle"
+        :class="['handle-' + h]"
+        :style="{
+          left: (handlePosition(h).x - 7) + 'px',
+          top: (handlePosition(h).y - 7) + 'px',
+          cursor: cursorForHandle(h)
+        }"
+        @mousedown="startResize(h, $event)"
+      ></div>
+    </template>
 
     <div class="annot-toolbar" ref="annotToolbarRef" :style="annotationToolbarStyle">
       <div class="group">
@@ -1819,6 +1931,14 @@ onUnmounted(() => {
   font-size: 12px;
   backdrop-filter: blur(8px);
   animation: ocrToastIn 0.18s ease-out;
+}
+
+.resize-handle {
+  position: fixed;
+  width: 14px;
+  height: 14px;
+  z-index: 9;
+  background: transparent;
 }
 
 @keyframes ocrToastIn {

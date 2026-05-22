@@ -14,6 +14,7 @@ const messages = ref<FavoriteMessage[]>([])
 const inputText = ref('')
 const isLoading = ref(false)
 const isStreaming = ref(false)
+const isHoveringMessages = ref(false)
 let abortController: AbortController | null = null
 const copiedIndex = ref<number | null>(null)
 const isDragging = ref(false)
@@ -326,6 +327,7 @@ const resizeCorner = ref('')
 const panelContent = ref<HTMLElement | null>(null)
 
 const scrollToBottom = () => {
+  if (isHoveringMessages.value) return
   requestAnimationFrame(() => {
     if (panelContent.value) {
       panelContent.value.scrollTop = panelContent.value.scrollHeight
@@ -400,6 +402,64 @@ const handleResizeEnd = () => {
   isResizing.value = false
   document.removeEventListener('mousemove', handleResize)
   document.removeEventListener('mouseup', handleResizeEnd)
+}
+
+const rerunQuestion = async (content: string, image?: string) => {
+  if (!content || isLoading.value) return
+  
+  const lastUserMsgIndex = messages.value.findIndex((m: FavoriteMessage, idx: number) => m.role === 'user' && idx === messages.value.length - 2)
+  if (lastUserMsgIndex !== -1) {
+    messages.value.splice(lastUserMsgIndex, 2)
+  } else {
+    messages.value = []
+  }
+  
+  const userMessage = { role: 'user', content, image: image || store.currentImage }
+  messages.value.push(userMessage)
+  messages.value.push({ role: 'assistant', content: '' })
+  scrollToBottom()
+
+  const currentInput = content
+  isLoading.value = true
+  isStreaming.value = false
+  const msgIndex = messages.value.length - 1
+  abortController = new AbortController()
+  const signal = abortController.signal
+
+  try {
+    const response = await store.sendToAI(currentInput, messages.value, userMessage.image || undefined, (token: string) => {
+      isStreaming.value = true
+      messages.value[msgIndex].content += token
+      scrollToBottom()
+    }, signal)
+    if (response && !messages.value[msgIndex].content) {
+      isStreaming.value = true
+      const chars = response.split('')
+      for (let i = 0; i < chars.length; i++) {
+        if (signal.aborted) break
+        messages.value[msgIndex].content += chars[i]
+        scrollToBottom()
+        await new Promise(r => setTimeout(r, 10))
+      }
+    }
+    saveToHistory()
+  } catch (error) {
+    if ((error as any)?.name === 'AbortError' || signal.aborted) {
+      if (!messages.value[msgIndex].content) {
+        messages.value[msgIndex].content = '已停止生成'
+      } else {
+        messages.value[msgIndex].content += '\n\n[已停止生成]'
+      }
+      saveToHistory()
+    } else {
+      messages.value[msgIndex].content = '抱歉，AI 服务暂时不可用。'
+    }
+    scrollToBottom()
+  }
+
+  abortController = null
+  isLoading.value = false
+  isStreaming.value = false
 }
 
 const sendMessage = async () => {
@@ -1270,7 +1330,7 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <div class="panel-content" ref="panelContent">
+    <div class="panel-content" ref="panelContent" @mouseenter="isHoveringMessages = true" @mouseleave="isHoveringMessages = false">
       <div v-if="showHistory" class="history-view">
         <div class="history-header">
           <span>历史记录</span>
@@ -1405,6 +1465,11 @@ onUnmounted(() => {
             <div class="message-content" v-if="msg.role === 'user'">
               <img v-if="msg.image" :src="msg.image" class="message-image" @click="openImageViewer(msg.image)" />
               <div v-if="msg.content" v-html="msg.content"></div>
+              <button class="rerun-btn" @click="rerunQuestion(msg.content, msg.image)" title="重新提问">
+                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M21 12a9 9 0 1 1-2.5-6.2M21 4v6h-6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
             </div>
             <div class="message-content" v-else-if="!msg.content && isLoading">
               <div class="typing-indicator">
@@ -2042,6 +2107,33 @@ onUnmounted(() => {
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
 }
 
+.rerun-btn {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  background: rgba(255, 255, 255, 0.1);
+  border: none;
+  border-radius: 6px;
+  padding: 6px;
+  cursor: pointer;
+  opacity: 0.6;
+  transition: opacity 0.2s, background 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.rerun-btn:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.rerun-btn svg {
+  width: 16px;
+  height: 16px;
+  color: #c86b7d;
+}
+
 .message-content {
   max-width: 100%;
   padding: 12px 16px;
@@ -2206,6 +2298,7 @@ onUnmounted(() => {
   border: 1px solid rgba(124, 137, 200, 0.25);
   border-bottom-right-radius: 4px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+  position: relative;
 }
 
 .message.assistant .message-content {
