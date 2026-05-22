@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useScreenshotStore } from '../store/screenshot'
 
 interface Settings {
   screenshotHotkey: string
   fullscreenHotkey: string
   windowHotkey: string
+  panelHotkey: string
   autoStart: boolean
   panelOpacity: number
   apiModel: string
@@ -17,6 +18,7 @@ const settings = ref<Settings>({
   screenshotHotkey: 'Alt+S',
   fullscreenHotkey: 'CommandOrControl+Alt+F',
   windowHotkey: 'CommandOrControl+Alt+W',
+  panelHotkey: 'CommandOrControl+Alt+P',
   autoStart: false,
   panelOpacity: 0.95,
   apiModel: 'doubao-vision-pro',
@@ -46,6 +48,8 @@ const formatBytes = (bytes: number) => {
 }
 
 onMounted(async () => {
+  window.addEventListener('keydown', handleEscKey)
+  
   try {
     currentVersion.value = await window.electronAPI.getVersion()
   } catch (e) {
@@ -69,6 +73,19 @@ onMounted(async () => {
     isDownloading.value = false
     downloadProgress.value = 0
   })
+
+  try {
+    const savedSettings = await window.electronAPI.getSettings()
+    if (savedSettings) {
+      settings.value = {
+        ...settings.value,
+        ...savedSettings
+      }
+    }
+    apiKey.value = localStorage.getItem('doubao_api_key') || ''
+  } catch (error) {
+    console.error('Failed to load settings:', error)
+  }
 })
 
 const checkForUpdates = async () => {
@@ -210,6 +227,9 @@ const finishRecording = () => {
     case 'window':
       settings.value.windowHotkey = recordingKey.value
       break
+    case 'panel':
+      settings.value.panelHotkey = recordingKey.value
+      break
   }
 
   isRecording.value = null
@@ -220,16 +240,14 @@ const closeWindow = () => {
   window.electronAPI.closeSettings()
 }
 
-onMounted(async () => {
-  try {
-    const savedSettings = await window.electronAPI.getSettings()
-    if (savedSettings) {
-      settings.value = savedSettings
-    }
-    apiKey.value = localStorage.getItem('doubao_api_key') || ''
-  } catch (error) {
-    console.error('Failed to load settings:', error)
+const handleEscKey = (e: KeyboardEvent) => {
+  if (e.key === 'Escape') {
+    closeWindow()
   }
+}
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', handleEscKey)
 })
 </script>
 
@@ -285,6 +303,21 @@ onMounted(async () => {
               @keyup="finishRecording"
             />
             <button v-if="isRecording !== 'window'" @click="startRecording('window')">设置</button>
+            <span v-else class="recording">按下快捷键...</span>
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <span class="setting-label">调出面板</span>
+          <div class="hotkey-control">
+            <input
+              type="text"
+              :value="isRecording === 'panel' ? recordingKey : settings.panelHotkey"
+              readonly
+              @keydown="handleKeyDown"
+              @keyup="finishRecording"
+            />
+            <button v-if="isRecording !== 'panel'" @click="startRecording('panel')">设置</button>
             <span v-else class="recording">按下快捷键...</span>
           </div>
         </div>

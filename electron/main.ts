@@ -284,11 +284,13 @@ function buildTrayMenu() {
   const screenshotHotkey = formatHotkey(store.get('screenshotHotkey', 'Alt+S') as string)
   const fullscreenHotkey = formatHotkey(store.get('fullscreenHotkey', 'CommandOrControl+Alt+F') as string)
   const windowHotkey = formatHotkey(store.get('windowHotkey', 'CommandOrControl+Alt+W') as string)
+  const panelHotkey = formatHotkey(store.get('panelHotkey', 'CommandOrControl+Alt+P') as string)
 
   const contextMenu = Menu.buildFromTemplate([
     { label: `截图 (${screenshotHotkey})`, click: () => createScreenshotWindow() },
     { label: `全屏截图 (${fullscreenHotkey})`, click: () => takeFullscreenScreenshot() },
     { label: `窗口截图 (${windowHotkey})`, click: () => takeWindowScreenshot() },
+    { label: `调出面板 (${panelHotkey})`, click: () => createPanelWindow() },
     { type: 'separator' },
     { label: '显示面板', click: () => createPanelWindow() },
     { label: '隐藏面板', click: () => panelWindow?.hide() },
@@ -366,6 +368,7 @@ function registerShortcuts() {
     const screenshotHotkey = store.get('screenshotHotkey', 'Alt+S') as string
     const fullscreenHotkey = store.get('fullscreenHotkey', 'CommandOrControl+Alt+F') as string
     const windowHotkey = store.get('windowHotkey', 'CommandOrControl+Alt+W') as string
+    const panelHotkey = store.get('panelHotkey', 'CommandOrControl+Alt+P') as string
 
     globalShortcut.unregisterAll()
 
@@ -382,7 +385,15 @@ function registerShortcuts() {
       takeWindowScreenshot()
     })
 
-    console.log('Shortcuts registered:', registered1, registered2, registered3)
+    const registered4 = globalShortcut.register(panelHotkey, () => {
+      if (panelWindow?.isVisible()) {
+        panelWindow.hide()
+      } else {
+        createPanelWindow()
+      }
+    })
+
+    console.log('Shortcuts registered:', registered1, registered2, registered3, registered4)
   } catch (error) {
     console.error('Failed to register shortcuts:', error)
   }
@@ -433,6 +444,7 @@ function setupIPC() {
       screenshotHotkey: store.get('screenshotHotkey', 'Alt+S'),
       fullscreenHotkey: store.get('fullscreenHotkey', 'CommandOrControl+Alt+F'),
       windowHotkey: store.get('windowHotkey', 'CommandOrControl+Alt+W'),
+      panelHotkey: store.get('panelHotkey', 'CommandOrControl+Alt+P'),
       autoStart: store.get('autoStart', false),
       panelOpacity: store.get('panelOpacity', 0.95),
       apiKey: store.get('apiKey', ''),
