@@ -171,5 +171,32 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const listener = (_: any, data: any) => callback(data)
     ipcRenderer.on('ai-stream-done', listener)
     return () => ipcRenderer.removeListener('ai-stream-done', listener)
-  }
+  },
+
+  agentGetAllowedDirs: () =>
+    ipcRenderer.invoke('agent-get-allowed-dirs'),
+
+  agentSetAllowedDirs: (dirs: string[]) =>
+    ipcRenderer.invoke('agent-set-allowed-dirs', dirs),
+
+  agentPickDirectory: () =>
+    ipcRenderer.invoke('agent-pick-directory'),
+
+  agentReadFile: (args: { path: string }) =>
+    ipcRenderer.invoke('agent-tool-read-file', args),
+
+  agentListDir: (args: { path: string }) =>
+    ipcRenderer.invoke('agent-tool-list-dir', args),
+
+  agentSearchFiles: (args: { path: string; pattern: string; contentMatch?: string }) =>
+    ipcRenderer.invoke('agent-tool-search-files', args),
+
+  agentWriteFile: (args: { path: string; content: string }) =>
+    ipcRenderer.invoke('agent-tool-write-file', args),
+
+  agentMoveFile: (args: { from: string; to: string }) =>
+    ipcRenderer.invoke('agent-tool-move-file', args),
+
+  agentDeleteFile: (args: { path: string }) =>
+    ipcRenderer.invoke('agent-tool-delete-file', args)
 })

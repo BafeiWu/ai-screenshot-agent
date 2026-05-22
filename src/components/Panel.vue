@@ -2,7 +2,7 @@
 import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
 import { marked } from 'marked'
 import Tesseract from 'tesseract.js'
-import { useScreenshotStore, type Favorite, type FavoriteMessage } from '../store/screenshot'
+import { useScreenshotStore, type Favorite, type FavoriteMessage, type AgentToolEvent } from '../store/screenshot'
 
 marked.setOptions({
   breaks: true,
@@ -15,6 +15,11 @@ const inputText = ref('')
 const isLoading = ref(false)
 const isStreaming = ref(false)
 const isHoveringMessages = ref(false)
+const agentMode = ref(false)
+const agentAuthorized = ref(false)
+const showAgentAuthModal = ref(false)
+const agentAllowedDirs = ref<string[]>([])
+let pendingAgentInput: string | null = null
 let abortController: AbortController | null = null
 const copiedIndex = ref<number | null>(null)
 const isDragging = ref(false)
@@ -414,7 +419,7 @@ const rerunQuestion = async (content: string, image?: string) => {
     messages.value = []
   }
   
-  const userMessage = { role: 'user', content, image: image || store.currentImage }
+  const userMessage = { role: 'user', content, image: image || store.currentImage || undefined }
   messages.value.push(userMessage)
   messages.value.push({ role: 'assistant', content: '' })
   scrollToBottom()
@@ -465,6 +470,22 @@ const rerunQuestion = async (content: string, image?: string) => {
 const sendMessage = async () => {
   if (!inputText.value.trim() || isLoading.value) return
 
+  if (agentMode.value && !agentAuthorized.value) {
+    pendingAgentInput = inputText.value
+    try {
+      agentAllowedDirs.value = await window.electronAPI.agentGetAllowedDirs()
+    } catch {
+      agentAllowedDirs.value = []
+    }
+    showAgentAuthModal.value = true
+    return
+  }
+
+  if (agentMode.value) {
+    await runAgentMessage(inputText.value)
+    return
+  }
+
   const userMessage = { role: 'user', content: inputText.value }
   messages.value.push(userMessage)
   messages.value.push({ role: 'assistant', content: '' })
@@ -505,6 +526,85 @@ const sendMessage = async () => {
       saveToHistory()
     } else {
       messages.value[msgIndex].content = '抱歉，AI 服务暂时不可用。'
+    }
+    scrollToBottom()
+  }
+
+  abortController = null
+  isLoading.value = false
+  isStreaming.value = false
+}
+
+const confirmAgentAuth = async () => {
+  showAgentAuthModal.value = false
+  agentAuthorized.value = true
+  if (pendingAgentInput) {
+    const text = pendingAgentInput
+    pendingAgentInput = null
+    await runAgentMessage(text)
+  }
+}
+
+const cancelAgentAuth = () => {
+  showAgentAuthModal.value = false
+  pendingAgentInput = null
+}
+
+const toggleAgentMode = () => {
+  agentMode.value = !agentMode.value
+  if (!agentMode.value) {
+    agentAuthorized.value = false
+  }
+}
+
+const runAgentMessage = async (input: string) => {
+  const userMessage: FavoriteMessage = { role: 'user', content: input }
+  messages.value.push(userMessage)
+  const assistantMsg: FavoriteMessage = { role: 'assistant', content: '', toolEvents: [] }
+  messages.value.push(assistantMsg)
+  scrollToBottom()
+
+  inputText.value = ''
+  isLoading.value = true
+  isStreaming.value = false
+  const msgIndex = messages.value.length - 1
+  abortController = new AbortController()
+  const signal = abortController.signal
+
+  try {
+    await store.runAgentTask(input, [], undefined, (e: { type: string; text?: string; toolName?: string; toolInput?: any; toolResult?: any; message?: string }) => {
+      const m = messages.value[msgIndex]
+      if (e.type === 'text' && e.text) {
+        isStreaming.value = true
+        m.content += e.text
+      } else if (e.type === 'tool_call') {
+        if (!m.toolEvents) m.toolEvents = []
+        m.toolEvents.push({
+          toolName: e.toolName || '',
+          input: e.toolInput,
+          status: 'running'
+        } as AgentToolEvent)
+      } else if (e.type === 'tool_result') {
+        if (!m.toolEvents) m.toolEvents = []
+        const last = [...m.toolEvents].reverse().find(t => t.toolName === e.toolName && t.status === 'running')
+        if (last) {
+          last.result = e.toolResult
+          last.status = e.toolResult?.error ? 'error' : 'done'
+        }
+      } else if (e.type === 'error') {
+        if (!m.content) m.content = `[Agent 错误] ${e.message || ''}`
+        else m.content += `\n\n[Agent 错误] ${e.message || ''}`
+      }
+      scrollToBottom()
+    }, signal)
+    saveToHistory()
+  } catch (error) {
+    const m = messages.value[msgIndex]
+    if ((error as any)?.name === 'AbortError' || signal.aborted) {
+      m.content = m.content ? m.content + '\n\n[已停止生成]' : '已停止生成'
+      saveToHistory()
+    } else {
+      m.content = '抱歉，Agent 任务失败: ' + ((error as any)?.message || '')
     }
     scrollToBottom()
   }
@@ -1290,6 +1390,16 @@ onUnmounted(() => {
         <span class="title">SnapAI</span>
       </div>
       <div class="header-actions">
+        <button class="btn-icon agent-toggle" :class="{ active: agentMode }" @click="toggleAgentMode" :title="agentMode ? '关闭 Agent 模式' : '开启 Agent 模式'">
+          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="4" y="7" width="16" height="12" rx="2" stroke="currentColor" stroke-width="1.6"/>
+            <path d="M12 3v4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+            <circle cx="12" cy="3" r="1.2" fill="currentColor"/>
+            <circle cx="9" cy="13" r="1.2" fill="currentColor"/>
+            <circle cx="15" cy="13" r="1.2" fill="currentColor"/>
+            <path d="M9 17h6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+          </svg>
+        </button>
         <button class="btn-icon" @click="openSettings" title="设置">
           <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
             <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.8"/>
@@ -1477,6 +1587,22 @@ onUnmounted(() => {
               </div>
             </div>
             <div class="message-wrapper" v-else>
+              <div v-if="msg.toolEvents && msg.toolEvents.length" class="agent-tool-events">
+                <div
+                  v-for="(t, i) in msg.toolEvents"
+                  :key="i"
+                  class="agent-tool-pill"
+                  :class="t.status"
+                >
+                  <span class="agent-tool-name">{{ t.toolName }}</span>
+                  <span class="agent-tool-target" v-if="t.input?.path || t.input?.from">{{ t.input.path || t.input.from }}</span>
+                  <span class="agent-tool-status">
+                    <span v-if="t.status === 'running'">…</span>
+                    <span v-else-if="t.status === 'done'">✓</span>
+                    <span v-else>✕</span>
+                  </span>
+                </div>
+              </div>
               <div class="message-content" v-html="formatText(msg.content)"></div>
               <div class="message-actions">
                 <button
@@ -1669,6 +1795,26 @@ onUnmounted(() => {
         <div class="dialog-footer">
           <button class="btn-cancel" @click="showFavoriteDialog = false">取消</button>
           <button class="btn-confirm" @click="confirmFavorite" :disabled="!favoriteTitle.trim()">确认收藏</button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="showAgentAuthModal" class="dialog-mask" @click.self="cancelAgentAuth">
+      <div class="dialog agent-auth-dialog">
+        <div class="dialog-title">授权 Agent 操作本次任务</div>
+        <div class="agent-auth-body">
+          <div class="agent-auth-tip">本次任务期间,Agent 可在以下目录读写、移动、删除(删除走回收站):</div>
+          <div v-if="agentAllowedDirs.length === 0" class="agent-auth-empty">
+            尚未配置允许目录,请先在设置 → Agent 允许目录 中添加。
+          </div>
+          <div v-else class="agent-auth-dirs">
+            <div v-for="d in agentAllowedDirs" :key="d" class="agent-auth-dir">{{ d }}</div>
+          </div>
+          <div class="agent-auth-warn">提示词注入或模型误解都可能导致非预期操作,授权前请确认目录范围。</div>
+        </div>
+        <div class="dialog-footer">
+          <button class="btn-cancel" @click="cancelAgentAuth">取消</button>
+          <button class="btn-confirm" :disabled="agentAllowedDirs.length === 0" @click="confirmAgentAuth">允许并开始</button>
         </div>
       </div>
     </div>
@@ -2901,5 +3047,115 @@ onUnmounted(() => {
 .viewer-tool-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+.btn-icon.agent-toggle.active {
+  background: linear-gradient(135deg, rgba(255, 107, 139, 0.2), rgba(168, 85, 247, 0.2));
+  color: #ff6b8b;
+}
+
+.agent-tool-events {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.agent-tool-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  font-size: 11px;
+  color: #ccc;
+  max-width: 100%;
+}
+
+.agent-tool-pill.running {
+  border-color: rgba(255, 107, 139, 0.4);
+}
+
+.agent-tool-pill.done {
+  border-color: rgba(74, 222, 128, 0.4);
+}
+
+.agent-tool-pill.error {
+  border-color: rgba(248, 113, 113, 0.4);
+  color: #f87171;
+}
+
+.agent-tool-name {
+  color: #ff6b8b;
+  font-weight: 500;
+}
+
+.agent-tool-pill.error .agent-tool-name {
+  color: #f87171;
+}
+
+.agent-tool-target {
+  color: #999;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 320px;
+}
+
+.agent-tool-status {
+  margin-left: auto;
+  color: #888;
+}
+
+.agent-auth-dialog {
+  max-width: 520px;
+}
+
+.agent-auth-body {
+  padding: 0 4px;
+}
+
+.agent-auth-tip {
+  font-size: 13px;
+  color: #ccc;
+  margin-bottom: 12px;
+}
+
+.agent-auth-empty {
+  font-size: 12px;
+  color: #f87171;
+  padding: 12px;
+  background: rgba(248, 113, 113, 0.08);
+  border-radius: 6px;
+  margin-bottom: 12px;
+}
+
+.agent-auth-dirs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+  margin-bottom: 12px;
+}
+
+.agent-auth-dir {
+  font-size: 12px;
+  color: #ccc;
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 4px;
+  word-break: break-all;
+}
+
+.agent-auth-warn {
+  font-size: 11px;
+  color: #f59e0b;
+  padding: 8px 10px;
+  background: rgba(245, 158, 11, 0.08);
+  border-radius: 4px;
+  line-height: 1.5;
 }
 </style>

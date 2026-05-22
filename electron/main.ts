@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, Tray, Menu, nativeImage, screen, desktopCapturer, dialog, Notification, clipboard } from 'electron'
+import { app, BrowserWindow, globalShortcut, ipcMain, Tray, Menu, nativeImage, screen, desktopCapturer, dialog, Notification, clipboard, shell } from 'electron'
 import path from 'path'
 import fs from 'fs'
 import Store from 'electron-store'
@@ -922,6 +922,151 @@ function setupIPC() {
       return { ok: false }
     } finally {
       aiAbortControllers.delete(requestId)
+    }
+  })
+
+  ipcMain.handle('agent-get-allowed-dirs', () => {
+    return (store.get('agentAllowedDirs', []) as string[]) || []
+  })
+
+  ipcMain.handle('agent-set-allowed-dirs', (_, dirs: string[]) => {
+    const clean = (dirs || []).filter(d => typeof d === 'string' && d.trim()).map(d => path.resolve(d))
+    store.set('agentAllowedDirs', clean)
+    return { success: true, dirs: clean }
+  })
+
+  ipcMain.handle('agent-pick-directory', async () => {
+    const targetWindow = settingsWindow || panelWindow || mainWindow
+    if (!targetWindow) return { canceled: true }
+    const result = await dialog.showOpenDialog(targetWindow, {
+      properties: ['openDirectory']
+    })
+    if (result.canceled || !result.filePaths[0]) return { canceled: true }
+    return { canceled: false, path: result.filePaths[0] }
+  })
+
+  const ensureAllowed = (target: string): { ok: true; resolved: string } | { ok: false; error: string } => {
+    const allowed = (store.get('agentAllowedDirs', []) as string[]) || []
+    if (!allowed.length) return { ok: false, error: '未配置允许目录,请先在设置里添加' }
+    let resolved: string
+    try {
+      resolved = fs.realpathSync(path.resolve(target))
+    } catch {
+      resolved = path.resolve(target)
+    }
+    const inside = allowed.some(dir => {
+      try {
+        const realDir = fs.realpathSync(dir)
+        const rel = path.relative(realDir, resolved)
+        return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
+      } catch {
+        return false
+      }
+    })
+    if (!inside) return { ok: false, error: `路径不在允许范围内: ${target}` }
+    return { ok: true, resolved }
+  }
+
+  ipcMain.handle('agent-tool-read-file', async (_, args: { path: string }) => {
+    const check = ensureAllowed(args.path)
+    if (!check.ok) return { error: check.error }
+    try {
+      const stat = fs.statSync(check.resolved)
+      if (stat.size > 2 * 1024 * 1024) return { error: '文件超过 2MB,无法读取' }
+      const content = fs.readFileSync(check.resolved, 'utf-8')
+      return { content }
+    } catch (e: any) {
+      return { error: e?.message || String(e) }
+    }
+  })
+
+  ipcMain.handle('agent-tool-list-dir', async (_, args: { path: string }) => {
+    const check = ensureAllowed(args.path)
+    if (!check.ok) return { error: check.error }
+    try {
+      const entries = fs.readdirSync(check.resolved, { withFileTypes: true })
+      const items = entries.slice(0, 500).map(e => ({
+        name: e.name,
+        type: e.isDirectory() ? 'dir' : e.isFile() ? 'file' : 'other'
+      }))
+      return { items, truncated: entries.length > 500 }
+    } catch (e: any) {
+      return { error: e?.message || String(e) }
+    }
+  })
+
+  ipcMain.handle('agent-tool-search-files', async (_, args: { path: string; pattern: string; contentMatch?: string }) => {
+    const check = ensureAllowed(args.path)
+    if (!check.ok) return { error: check.error }
+    try {
+      const results: Array<{ path: string; type: 'name' | 'content' }> = []
+      const pattern = args.pattern || ''
+      const re = pattern ? new RegExp(pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*'), 'i') : null
+      const contentRe = args.contentMatch ? new RegExp(args.contentMatch, 'i') : null
+      const walk = (dir: string, depth: number) => {
+        if (results.length >= 100 || depth > 6) return
+        let entries: fs.Dirent[]
+        try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+        for (const e of entries) {
+          if (results.length >= 100) break
+          if (e.name.startsWith('.') || e.name === 'node_modules') continue
+          const full = path.join(dir, e.name)
+          if (e.isDirectory()) {
+            walk(full, depth + 1)
+          } else if (e.isFile()) {
+            if (re && re.test(e.name)) results.push({ path: full, type: 'name' })
+            else if (contentRe) {
+              try {
+                const stat = fs.statSync(full)
+                if (stat.size > 1024 * 1024) continue
+                const text = fs.readFileSync(full, 'utf-8')
+                if (contentRe.test(text)) results.push({ path: full, type: 'content' })
+              } catch {}
+            }
+          }
+        }
+      }
+      walk(check.resolved, 0)
+      return { results, truncated: results.length >= 100 }
+    } catch (e: any) {
+      return { error: e?.message || String(e) }
+    }
+  })
+
+  ipcMain.handle('agent-tool-write-file', async (_, args: { path: string; content: string }) => {
+    const check = ensureAllowed(args.path)
+    if (!check.ok) return { error: check.error }
+    try {
+      fs.mkdirSync(path.dirname(check.resolved), { recursive: true })
+      fs.writeFileSync(check.resolved, args.content ?? '', 'utf-8')
+      return { success: true, path: check.resolved }
+    } catch (e: any) {
+      return { error: e?.message || String(e) }
+    }
+  })
+
+  ipcMain.handle('agent-tool-move-file', async (_, args: { from: string; to: string }) => {
+    const a = ensureAllowed(args.from)
+    if (!a.ok) return { error: a.error }
+    const b = ensureAllowed(args.to)
+    if (!b.ok) return { error: b.error }
+    try {
+      fs.mkdirSync(path.dirname(b.resolved), { recursive: true })
+      fs.renameSync(a.resolved, b.resolved)
+      return { success: true, from: a.resolved, to: b.resolved }
+    } catch (e: any) {
+      return { error: e?.message || String(e) }
+    }
+  })
+
+  ipcMain.handle('agent-tool-delete-file', async (_, args: { path: string }) => {
+    const check = ensureAllowed(args.path)
+    if (!check.ok) return { error: check.error }
+    try {
+      await shell.trashItem(check.resolved)
+      return { success: true, path: check.resolved }
+    } catch (e: any) {
+      return { error: e?.message || String(e) }
     }
   })
 }

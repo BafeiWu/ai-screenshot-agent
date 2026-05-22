@@ -38,6 +38,31 @@ const formApiModel = ref('')
 const formApiBaseUrl = ref('')
 const formError = ref('')
 
+const agentAllowedDirs = ref<string[]>([])
+
+const loadAgentDirs = async () => {
+  try {
+    agentAllowedDirs.value = await window.electronAPI.agentGetAllowedDirs()
+  } catch {
+    agentAllowedDirs.value = []
+  }
+}
+
+const addAgentDir = async () => {
+  const result = await window.electronAPI.agentPickDirectory()
+  if (result.canceled || !result.path) return
+  if (agentAllowedDirs.value.includes(result.path)) return
+  const next = [...agentAllowedDirs.value, result.path]
+  const saved = await window.electronAPI.agentSetAllowedDirs(next)
+  agentAllowedDirs.value = saved.dirs
+}
+
+const removeAgentDir = async (dir: string) => {
+  const next = agentAllowedDirs.value.filter((d: string) => d !== dir)
+  const saved = await window.electronAPI.agentSetAllowedDirs(next)
+  agentAllowedDirs.value = saved.dirs
+}
+
 const isRecording = ref<string | null>(null)
 const recordingKey = ref('')
 const saveStatus = ref('')
@@ -204,6 +229,7 @@ onMounted(async () => {
     const ai = await window.electronAPI.getAiProfiles()
     aiProfiles.value = ai.profiles || []
     activeProfileId.value = ai.activeId || (aiProfiles.value[0]?.id ?? '')
+    await loadAgentDirs()
   } catch (error) {
     console.error('Failed to load settings:', error)
   }
@@ -280,6 +306,14 @@ const handleSave = async () => {
   try {
     saveStatus.value = '保存中...'
     const plainSettings = JSON.parse(JSON.stringify(settings.value))
+    
+    if (activeProfile.value && formApiKey.value) {
+      activeProfile.value.apiKey = formApiKey.value
+      activeProfile.value.apiModel = formApiModel.value || 'doubao-vision-pro'
+      activeProfile.value.apiBaseUrl = formApiBaseUrl.value || 'https://ark.cn-beijing.volces.com/api/v3'
+      await persistAiProfiles()
+    }
+    
     const result = await window.electronAPI.saveSettings(plainSettings) as any
 
     if (result && typeof result === 'object' && 'success' in result) {
@@ -521,6 +555,19 @@ onUnmounted(() => {
             <button class="primary-btn small" @click="submitForm">保存</button>
           </div>
         </template>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Agent 允许目录</div>
+        <div class="agent-dirs-tip">Agent 模式下,模型只能在以下目录内读写。</div>
+        <div class="agent-dirs-list">
+          <div v-for="dir in agentAllowedDirs" :key="dir" class="agent-dir-row">
+            <span class="agent-dir-path" :title="dir">{{ dir }}</span>
+            <button class="row-btn danger" @click="removeAgentDir(dir)">移除</button>
+          </div>
+          <div v-if="agentAllowedDirs.length === 0" class="agent-dirs-empty">暂未添加任何目录</div>
+        </div>
+        <button class="ghost-btn small agent-dir-add" @click="addAgentDir">+ 添加目录</button>
       </div>
 
       <div class="section">
@@ -933,6 +980,51 @@ onUnmounted(() => {
 .full-input {
   width: 100%;
   box-sizing: border-box;
+}
+
+.agent-dirs-tip {
+  font-size: 11px;
+  color: #888;
+  margin-bottom: 8px;
+}
+
+.agent-dirs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.agent-dir-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: #1f2849;
+  border: 1px solid #2a2a4a;
+  border-radius: 6px;
+}
+
+.agent-dir-path {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: #ccc;
+  word-break: break-all;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-dirs-empty {
+  font-size: 11px;
+  color: #666;
+  text-align: center;
+  padding: 10px 0;
+}
+
+.agent-dir-add {
+  width: 100%;
 }
 
 .slider-control {
