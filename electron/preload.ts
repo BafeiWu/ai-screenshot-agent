@@ -25,6 +25,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveSettings: (settings: any) =>
     ipcRenderer.invoke('save-settings', settings),
 
+  getAiProfiles: () =>
+    ipcRenderer.invoke('get-ai-profiles'),
+
+  saveAiProfiles: (payload: { profiles: any[]; activeId: string }) =>
+    ipcRenderer.invoke('save-ai-profiles', payload),
+
   getHistory: () =>
     ipcRenderer.invoke('get-history'),
 
@@ -141,5 +147,29 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('get-favorites'),
 
   saveFavorites: (favorites: any[]) =>
-    ipcRenderer.invoke('save-favorites', favorites)
+    ipcRenderer.invoke('save-favorites', favorites),
+
+  aiStreamRequest: (payload: { requestId: string; endpoint: string; apiKey: string; body: any; headers?: Record<string, string> }) =>
+    ipcRenderer.invoke('ai-stream-request', payload),
+
+  aiStreamAbort: (requestId: string) =>
+    ipcRenderer.invoke('ai-stream-abort', requestId),
+
+  onAiStreamChunk: (callback: (data: { requestId: string; chunk: string }) => void) => {
+    const listener = (_: any, data: any) => callback(data)
+    ipcRenderer.on('ai-stream-chunk', listener)
+    return () => ipcRenderer.removeListener('ai-stream-chunk', listener)
+  },
+
+  onAiStreamError: (callback: (data: { requestId: string; message: string; aborted?: boolean }) => void) => {
+    const listener = (_: any, data: any) => callback(data)
+    ipcRenderer.on('ai-stream-error', listener)
+    return () => ipcRenderer.removeListener('ai-stream-error', listener)
+  },
+
+  onAiStreamDone: (callback: (data: { requestId: string }) => void) => {
+    const listener = (_: any, data: any) => callback(data)
+    ipcRenderer.on('ai-stream-done', listener)
+    return () => ipcRenderer.removeListener('ai-stream-done', listener)
+  }
 })

@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { useScreenshotStore } from '../store/screenshot'
 
 interface Settings {
   screenshotHotkey: string
@@ -9,22 +8,36 @@ interface Settings {
   panelHotkey: string
   autoStart: boolean
   panelOpacity: number
+}
+
+interface AiProfile {
+  id: string
+  title: string
+  apiKey: string
   apiModel: string
   apiBaseUrl: string
 }
 
-const store = useScreenshotStore()
 const settings = ref<Settings>({
   screenshotHotkey: 'Alt+S',
   fullscreenHotkey: 'CommandOrControl+Alt+F',
   windowHotkey: 'CommandOrControl+Alt+W',
   panelHotkey: 'CommandOrControl+Alt+P',
   autoStart: false,
-  panelOpacity: 0.95,
-  apiModel: 'doubao-vision-pro',
-  apiBaseUrl: 'https://ark.cn-beijing.volces.com/api/v3'
+  panelOpacity: 0.95
 })
-const apiKey = ref('')
+
+const aiProfiles = ref<AiProfile[]>([])
+const activeProfileId = ref<string>('')
+type AiView = 'default' | 'list' | 'form'
+const aiView = ref<AiView>('default')
+const editingProfileId = ref<string | null>(null)
+const formTitle = ref('')
+const formApiKey = ref('')
+const formApiModel = ref('')
+const formApiBaseUrl = ref('')
+const formError = ref('')
+
 const isRecording = ref<string | null>(null)
 const recordingKey = ref('')
 const saveStatus = ref('')
@@ -34,6 +47,10 @@ const latestVersion = ref('')
 const isDownloading = ref(false)
 const downloadProgress = ref(0)
 const downloadSpeed = ref('')
+
+const activeProfile = computed(() =>
+  aiProfiles.value.find((p: AiProfile) => p.id === activeProfileId.value) || null
+)
 
 const formatBytes = (bytes: number) => {
   if (!bytes) return '0 B'
@@ -47,9 +64,107 @@ const formatBytes = (bytes: number) => {
   return `${v.toFixed(1)} ${units[i]}`
 }
 
+const genId = () => `p_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+
+const persistAiProfiles = async () => {
+  await window.electronAPI.saveAiProfiles({
+    profiles: JSON.parse(JSON.stringify(aiProfiles.value)),
+    activeId: activeProfileId.value
+  })
+}
+
+const openNewProfile = () => {
+  editingProfileId.value = null
+  formTitle.value = ''
+  formApiKey.value = ''
+  formApiModel.value = ''
+  formApiBaseUrl.value = ''
+  formError.value = ''
+  aiView.value = 'form'
+}
+
+const openEditProfile = (id: string) => {
+  const p = aiProfiles.value.find((x: AiProfile) => x.id === id)
+  if (!p) return
+  editingProfileId.value = id
+  formTitle.value = p.title
+  formApiKey.value = ''
+  formApiModel.value = p.apiModel
+  formApiBaseUrl.value = p.apiBaseUrl
+  formError.value = ''
+  aiView.value = 'form'
+}
+
+const cancelForm = () => {
+  formError.value = ''
+  aiView.value = aiProfiles.value.length > 0 ? 'list' : 'default'
+}
+
+const submitForm = async () => {
+  const title = formTitle.value.trim()
+  const model = formApiModel.value.trim()
+  const baseUrl = formApiBaseUrl.value.trim()
+  const key = formApiKey.value
+  if (!title || !model || !baseUrl) {
+    formError.value = '标题、模型、API 地址不能为空'
+    return
+  }
+
+  if (editingProfileId.value) {
+    const p = aiProfiles.value.find((x: AiProfile) => x.id === editingProfileId.value)
+    if (p) {
+      p.title = title
+      p.apiModel = model
+      p.apiBaseUrl = baseUrl
+      if (key) p.apiKey = key
+    }
+  } else {
+    if (!key) {
+      formError.value = 'API Key 不能为空'
+      return
+    }
+    const profile: AiProfile = {
+      id: genId(),
+      title,
+      apiKey: key,
+      apiModel: model,
+      apiBaseUrl: baseUrl
+    }
+    aiProfiles.value.push(profile)
+    if (!activeProfileId.value) activeProfileId.value = profile.id
+  }
+
+  await persistAiProfiles()
+  aiView.value = 'list'
+}
+
+const selectProfile = async (id: string) => {
+  activeProfileId.value = id
+  await persistAiProfiles()
+}
+
+const deleteProfile = async (id: string) => {
+  const idx = aiProfiles.value.findIndex((x: AiProfile) => x.id === id)
+  if (idx < 0) return
+  aiProfiles.value.splice(idx, 1)
+  if (activeProfileId.value === id) {
+    activeProfileId.value = aiProfiles.value[0]?.id || ''
+  }
+  await persistAiProfiles()
+  if (aiProfiles.value.length === 0) aiView.value = 'default'
+}
+
+const openManageList = () => {
+  aiView.value = 'list'
+}
+
+const finishList = () => {
+  aiView.value = 'default'
+}
+
 onMounted(async () => {
   window.addEventListener('keydown', handleEscKey)
-  
+
   try {
     currentVersion.value = await window.electronAPI.getVersion()
   } catch (e) {
@@ -78,11 +193,17 @@ onMounted(async () => {
     const savedSettings = await window.electronAPI.getSettings()
     if (savedSettings) {
       settings.value = {
-        ...settings.value,
-        ...savedSettings
+        screenshotHotkey: savedSettings.screenshotHotkey ?? settings.value.screenshotHotkey,
+        fullscreenHotkey: savedSettings.fullscreenHotkey ?? settings.value.fullscreenHotkey,
+        windowHotkey: savedSettings.windowHotkey ?? settings.value.windowHotkey,
+        panelHotkey: savedSettings.panelHotkey ?? settings.value.panelHotkey,
+        autoStart: savedSettings.autoStart ?? settings.value.autoStart,
+        panelOpacity: savedSettings.panelOpacity ?? settings.value.panelOpacity
       }
     }
-    apiKey.value = localStorage.getItem('doubao_api_key') || ''
+    const ai = await window.electronAPI.getAiProfiles()
+    aiProfiles.value = ai.profiles || []
+    activeProfileId.value = ai.activeId || (aiProfiles.value[0]?.id ?? '')
   } catch (error) {
     console.error('Failed to load settings:', error)
   }
@@ -159,35 +280,22 @@ const handleSave = async () => {
   try {
     saveStatus.value = '保存中...'
     const plainSettings = JSON.parse(JSON.stringify(settings.value))
-    if (apiKey.value) {
-      plainSettings.apiKey = apiKey.value
-    }
-    const result = await window.electronAPI.saveSettings(plainSettings)
-    
-    if (apiKey.value) {
-      localStorage.setItem('doubao_api_key', apiKey.value)
-    }
-    
-    console.log('Save result:', result)
+    const result = await window.electronAPI.saveSettings(plainSettings) as any
+
     if (result && typeof result === 'object' && 'success' in result) {
       if (result.success) {
         saveStatus.value = '保存成功!'
         setTimeout(() => {
           window.electronAPI.closeSettings()
-        }, 500)
+        }, 150)
       } else {
         saveStatus.value = '保存失败: ' + (result.error || '未知错误')
       }
-    } else if (result === true) {
-      saveStatus.value = '保存成功!'
-      setTimeout(() => {
-        window.electronAPI.closeSettings()
-      }, 500)
     } else {
       saveStatus.value = '保存成功!'
       setTimeout(() => {
         window.electronAPI.closeSettings()
-      }, 500)
+      }, 150)
     }
   } catch (error) {
     saveStatus.value = '保存失败: ' + String(error)
@@ -207,7 +315,7 @@ const handleKeyDown = (e: KeyboardEvent) => {
 
   const keys: string[] = []
   if (e.ctrlKey) keys.push('CommandOrControl')
-  if (e.alt) keys.push('Alt')
+  if (e.altKey) keys.push('Alt')
   if (e.shiftKey) keys.push('Shift')
   if (e.metaKey) keys.push('Meta')
 
@@ -330,33 +438,89 @@ onUnmounted(() => {
 
       <div class="section">
         <div class="section-title">AI 设置</div>
-        <div class="setting-row vertical">
-          <span class="setting-label">API Key</span>
-          <input
-            type="password"
-            v-model="apiKey"
-            placeholder="输入 API Key"
-            class="full-input"
-          />
-        </div>
-        <div class="setting-row vertical">
-          <span class="setting-label">模型</span>
-          <input
-            type="text"
-            v-model="settings.apiModel"
-            placeholder="例如: doubao-vision-pro"
-            class="full-input"
-          />
-        </div>
-        <div class="setting-row vertical">
-          <span class="setting-label">API 地址</span>
-          <input
-            type="text"
-            v-model="settings.apiBaseUrl"
-            placeholder="例如: https://ark.cn-beijing.volces.com/api/v3"
-            class="full-input"
-          />
-        </div>
+
+        <template v-if="aiView === 'default'">
+          <div v-if="activeProfile" class="ai-active-row">
+            <div class="ai-active-info">
+              <div class="ai-active-title">{{ activeProfile.title }}</div>
+              <div class="ai-active-model">{{ activeProfile.apiModel }}</div>
+            </div>
+            <button class="ghost-btn" @click="openManageList">切换 / 管理</button>
+          </div>
+          <button v-else class="primary-btn full" @click="openNewProfile">新建模型库</button>
+        </template>
+
+        <template v-else-if="aiView === 'list'">
+          <div class="ai-list-header">
+            <span class="ai-list-tip">点选要使用的模型</span>
+            <button class="ghost-btn small" @click="openNewProfile">+ 新建</button>
+          </div>
+          <div class="ai-list">
+            <div
+              v-for="p in aiProfiles"
+              :key="p.id"
+              class="ai-list-row"
+              :class="{ active: p.id === activeProfileId }"
+              @click="selectProfile(p.id)"
+            >
+              <span class="radio-dot" :class="{ checked: p.id === activeProfileId }"></span>
+              <div class="ai-row-info">
+                <div class="ai-row-title">{{ p.title }}</div>
+                <div class="ai-row-model">{{ p.apiModel }}</div>
+              </div>
+              <button class="row-btn" @click.stop="openEditProfile(p.id)">编辑</button>
+              <button class="row-btn danger" @click.stop="deleteProfile(p.id)">删除</button>
+            </div>
+            <div v-if="aiProfiles.length === 0" class="ai-empty">暂无模型，点击"+ 新建"开始</div>
+          </div>
+          <div class="ai-list-footer">
+            <button class="ghost-btn small" @click="finishList">完成</button>
+          </div>
+        </template>
+
+        <template v-else-if="aiView === 'form'">
+          <div class="setting-row vertical">
+            <span class="setting-label">标题</span>
+            <input
+              type="text"
+              v-model="formTitle"
+              placeholder="例如: 豆包视觉、Claude Sonnet"
+              class="full-input"
+            />
+          </div>
+          <div class="setting-row vertical">
+            <span class="setting-label">API Key</span>
+            <input
+              type="password"
+              v-model="formApiKey"
+              :placeholder="editingProfileId ? '••••已保存（留空保持不变）' : '输入 API Key'"
+              class="full-input"
+            />
+          </div>
+          <div class="setting-row vertical">
+            <span class="setting-label">模型</span>
+            <input
+              type="text"
+              v-model="formApiModel"
+              placeholder="例如: doubao-vision-pro"
+              class="full-input"
+            />
+          </div>
+          <div class="setting-row vertical">
+            <span class="setting-label">API 地址</span>
+            <input
+              type="text"
+              v-model="formApiBaseUrl"
+              placeholder="例如: https://ark.cn-beijing.volces.com/api/v3"
+              class="full-input"
+            />
+          </div>
+          <div v-if="formError" class="form-error">{{ formError }}</div>
+          <div class="form-actions">
+            <button class="ghost-btn small" @click="cancelForm">取消</button>
+            <button class="primary-btn small" @click="submitForm">保存</button>
+          </div>
+        </template>
       </div>
 
       <div class="section">
@@ -416,7 +580,7 @@ onUnmounted(() => {
 .settings-window {
   width: 100%;
   height: 100vh;
-  background: #1a1a2e;
+  background: #17213d;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -518,7 +682,7 @@ onUnmounted(() => {
 
 .hotkey-control input {
   width: 140px;
-  background: #0f0f1a;
+  background: #1f2849;
   border: 1px solid #2a2a4a;
   border-radius: 6px;
   padding: 8px 10px;
@@ -554,7 +718,7 @@ onUnmounted(() => {
 
 .full-input {
   width: 200px;
-  background: #0f0f1a;
+  background: #1f2849;
   border: 1px solid #2a2a4a;
   border-radius: 6px;
   padding: 8px 10px;
@@ -565,6 +729,210 @@ onUnmounted(() => {
 .full-input:focus {
   border-color: #e94560;
   outline: none;
+}
+
+.ai-active-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border: 1px solid transparent;
+  background:
+    linear-gradient(#1f2849, #1f2849) padding-box,
+    linear-gradient(135deg, #ff6b8b, #e94560 45%, #a855f7 100%) border-box;
+  border-radius: 6px;
+  padding: 10px 12px;
+  gap: 10px;
+}
+
+.ai-active-info {
+  min-width: 0;
+  flex: 1;
+}
+
+.ai-active-title {
+  font-size: 13px;
+  color: #fff;
+  font-weight: 500;
+}
+
+.ai-active-model {
+  font-size: 11px;
+  color: #888;
+  margin-top: 2px;
+  word-break: break-all;
+}
+
+.ai-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.ai-list-tip {
+  font-size: 11px;
+  color: #888;
+}
+
+.ai-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.ai-list-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: #1f2849;
+  border: 1px solid #2a2a4a;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.ai-list-row:hover {
+  border-color: #3a3a5a;
+}
+
+.ai-list-row.active {
+  border-color: #e94560;
+}
+
+.radio-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1.5px solid #555;
+  flex-shrink: 0;
+  position: relative;
+}
+
+.radio-dot.checked {
+  border-color: #e94560;
+}
+
+.radio-dot.checked::after {
+  content: '';
+  position: absolute;
+  inset: 2px;
+  background: #e94560;
+  border-radius: 50%;
+}
+
+.ai-row-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.ai-row-title {
+  font-size: 12px;
+  color: #fff;
+}
+
+.ai-row-model {
+  font-size: 10px;
+  color: #888;
+  margin-top: 2px;
+  word-break: break-all;
+}
+
+.row-btn {
+  background: transparent;
+  border: 1px solid #2a2a4a;
+  border-radius: 4px;
+  color: #ccc;
+  font-size: 11px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.row-btn:hover {
+  border-color: #e94560;
+  color: #e94560;
+}
+
+.row-btn.danger:hover {
+  border-color: #f87171;
+  color: #f87171;
+}
+
+.ai-empty {
+  text-align: center;
+  font-size: 11px;
+  color: #666;
+  padding: 16px 0;
+}
+
+.ai-list-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
+.form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.form-error {
+  font-size: 11px;
+  color: #f87171;
+  margin-top: 4px;
+}
+
+.ghost-btn {
+  background: transparent;
+  border: 1px solid #2a2a4a;
+  border-radius: 6px;
+  color: #ccc;
+  font-size: 12px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.ghost-btn:hover {
+  border-color: #e94560;
+  color: #e94560;
+}
+
+.ghost-btn.small {
+  padding: 5px 10px;
+  font-size: 11px;
+}
+
+.primary-btn {
+  background: #e94560;
+  border: none;
+  border-radius: 6px;
+  color: #fff;
+  font-size: 12px;
+  padding: 8px 16px;
+  cursor: pointer;
+}
+
+.primary-btn:hover {
+  opacity: 0.9;
+}
+
+.primary-btn.full {
+  width: 100%;
+  padding: 10px;
+}
+
+.primary-btn.small {
+  padding: 5px 12px;
+  font-size: 11px;
+}
+
+.full-input {
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .slider-control {

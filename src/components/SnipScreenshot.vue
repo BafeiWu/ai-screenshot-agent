@@ -445,6 +445,7 @@ const onMouseUp = () => {
 
   if (mode.value === 'select') {
     if (hasSelection.value) {
+      mode.value = 'annotate'
     } else {
       selection.value = { x: 0, y: 0, width: 0, height: 0 }
     }

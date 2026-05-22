@@ -87,78 +87,160 @@ export const useScreenshotStore = defineStore('screenshot', () => {
     }
 
     try {
-      const endpoint = apiBaseUrl.endsWith('/') ? apiBaseUrl + 'chat/completions' : apiBaseUrl + '/chat/completions'
+      let endpoint = apiBaseUrl
+      let requestBody: any = {}
+      let extraHeaders: Record<string, string> | undefined
+      const isAnthropic = apiBaseUrl.includes('cc.freemodel') || apiBaseUrl.includes('anthropic') || /\/v1\/messages\b/.test(apiBaseUrl)
+      const isResponses = !isAnthropic && (apiBaseUrl.includes('freemodel') || apiBaseUrl.includes('codex'))
+
+      if (isAnthropic) {
+        endpoint = apiBaseUrl.endsWith('/') ? apiBaseUrl + 'v1/messages' : apiBaseUrl + '/v1/messages'
+        const anthropicContent: any[] = []
+        if (image) {
+          const m = image.match(/^data:(image\/\w+);base64,(.+)$/)
+          if (m) {
+            anthropicContent.push({
+              type: 'image',
+              source: { type: 'base64', media_type: m[1], data: m[2] }
+            })
+          }
+        }
+        anthropicContent.push({ type: 'text', text: userMessage })
+
+        requestBody = {
+          model: apiModel,
+          max_tokens: 4096,
+          messages: [{ role: 'user', content: anthropicContent }],
+          stream: true
+        }
+        extraHeaders = {
+          'x-api-key': apiKeyValue,
+          'anthropic-version': '2023-06-01'
+        }
+      } else if (isResponses) {
+        endpoint = apiBaseUrl.endsWith('/') ? apiBaseUrl + 'v1/responses' : apiBaseUrl + '/v1/responses'
+        const inputContent: any[] = []
+
+        if (image) {
+          inputContent.push({ type: 'input_image', image_url: image })
+        }
+        inputContent.push({ type: 'input_text', text: userMessage })
+
+        requestBody = {
+          model: apiModel,
+          input: [
+            {
+              role: 'user',
+              content: inputContent
+            }
+          ],
+          stream: true
+        }
+      } else {
+        endpoint = apiBaseUrl.endsWith('/') ? apiBaseUrl + 'chat/completions' : apiBaseUrl + '/chat/completions'
+        requestBody = {
+          model: apiModel,
+          messages: messages,
+          stream: true
+        }
+      }
+      
       console.log('API Request:', {
         endpoint,
         apiKeyValue: apiKeyValue ? apiKeyValue.substring(0, 10) + '...' : 'empty',
         apiModel,
-        imageLength: image ? image.length : 0
+        imageLength: image ? image.length : 0,
+        requestBody: JSON.stringify(requestBody)
       })
 
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKeyValue}`
-        },
-        body: JSON.stringify({
-          model: apiModel,
-          messages: messages,
-          stream: true
-        }),
-        signal
-      })
-
-      if (!response.ok) {
-        const errorText = await response.text()
-        console.error('API Error Response:', response.status, errorText)
-        throw new Error(`API request failed: ${response.status} - ${errorText}`)
-      }
-
-      const reader = response.body?.getReader()
-      if (!reader) {
-        throw new Error('No response body')
-      }
-
-      const decoder = new TextDecoder()
+      const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
       let fullContent = ''
+      let buffer = ''
 
-      while (true) {
-        if (signal?.aborted) {
-          try { await reader.cancel() } catch {}
-          throw new DOMException('Aborted', 'AbortError')
-        }
-        const { done, value } = await reader.read()
-        if (done) break
-        if (signal?.aborted) {
-          try { await reader.cancel() } catch {}
-          throw new DOMException('Aborted', 'AbortError')
-        }
+      let offChunk: (() => void) | null = null
+      let offError: (() => void) | null = null
+      let offDone: (() => void) | null = null
+      const cleanup = () => {
+        offChunk?.(); offChunk = null
+        offError?.(); offError = null
+        offDone?.(); offDone = null
+      }
 
-        const chunk = decoder.decode(value, { stream: true })
-        const lines = chunk.split('\n')
+      offChunk = window.electronAPI.onAiStreamChunk(({ requestId: rid, chunk }) => {
+        if (rid !== requestId) return
+        buffer += chunk
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
 
         for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const data = line.slice(6)
-            if (data === '[DONE]') continue
-            try {
-              const parsed = JSON.parse(data)
-              const content = parsed.choices?.[0]?.delta?.content
-              if (content) {
-                fullContent += content
-                if (onToken) {
-                  onToken(content)
-                }
+          if (!line.startsWith('data: ')) continue
+          const data = line.slice(6)
+          if (data === '[DONE]') continue
+          try {
+            const parsed = JSON.parse(data)
+            let content = ''
+
+            if (isAnthropic) {
+              if (parsed.type === 'content_block_delta' && parsed.delta?.type === 'text_delta' && typeof parsed.delta.text === 'string') {
+                content = parsed.delta.text
               }
-            } catch (e) {
-              // Ignore parse errors for incomplete chunks
+            } else if (isResponses) {
+              if (parsed.type === 'response.output_text.delta' && typeof parsed.delta === 'string') {
+                content = parsed.delta
+              } else if (parsed.type === 'response.refusal.delta' && typeof parsed.delta === 'string') {
+                content = parsed.delta
+              }
+            } else {
+              content = parsed.choices?.[0]?.delta?.content || ''
             }
+
+            if (content) {
+              fullContent += content
+              if (onToken) onToken(content)
+            }
+          } catch {
+            // Ignore parse errors for incomplete chunks
           }
         }
-      }
+      })
 
-      return fullContent || 'AI 未能返回有效回答'
+      const result = await new Promise<string>((resolve, reject) => {
+        offError = window.electronAPI.onAiStreamError(({ requestId: rid, message, aborted }) => {
+          if (rid !== requestId) return
+          cleanup()
+          if (aborted) reject(new DOMException('Aborted', 'AbortError'))
+          else reject(new Error(message))
+        })
+
+        offDone = window.electronAPI.onAiStreamDone(({ requestId: rid }) => {
+          if (rid !== requestId) return
+          cleanup()
+          resolve(fullContent || 'AI 未能返回有效回答')
+        })
+
+        if (signal) {
+          if (signal.aborted) {
+            window.electronAPI.aiStreamAbort(requestId)
+          } else {
+            signal.addEventListener('abort', () => {
+              window.electronAPI.aiStreamAbort(requestId)
+            }, { once: true })
+          }
+        }
+
+        window.electronAPI.aiStreamRequest({
+          requestId,
+          endpoint,
+          apiKey: apiKeyValue,
+          body: requestBody,
+          headers: extraHeaders
+        }).catch((err: any) => {
+          cleanup()
+          reject(err)
+        })
+      })
+
+      return result
     } catch (error) {
       if ((error as any)?.name === 'AbortError' || signal?.aborted) {
         throw error
@@ -196,6 +278,8 @@ declare global {
       resizePanel: (width: number, height: number) => Promise<void>
       getSettings: () => Promise<any>
       saveSettings: (settings: any) => Promise<boolean>
+      getAiProfiles: () => Promise<{ profiles: Array<{ id: string; title: string; apiKey: string; apiModel: string; apiBaseUrl: string }>; activeId: string }>
+      saveAiProfiles: (payload: { profiles: Array<{ id: string; title: string; apiKey: string; apiModel: string; apiBaseUrl: string }>; activeId: string }) => Promise<{ success: boolean; error?: string }>
       getHistory: () => Promise<any[]>
       saveHistory: (history: any[]) => Promise<boolean>
       openSettings: () => Promise<void>
@@ -216,6 +300,11 @@ declare global {
       onUpdateError: (callback: (message: string) => void) => void
       getFavorites: () => Promise<any[]>
       saveFavorites: (favorites: any[]) => Promise<boolean>
+      aiStreamRequest: (payload: { requestId: string; endpoint: string; apiKey: string; body: any; headers?: Record<string, string> }) => Promise<{ ok: boolean }>
+      aiStreamAbort: (requestId: string) => Promise<void>
+      onAiStreamChunk: (callback: (data: { requestId: string; chunk: string }) => void) => () => void
+      onAiStreamError: (callback: (data: { requestId: string; message: string; aborted?: boolean }) => void) => () => void
+      onAiStreamDone: (callback: (data: { requestId: string }) => void) => () => void
       onScreenshotTaken: (callback: (data: { type: string; dataUrl: string; customPrompt?: string }) => void) => void
       onAIResponse: (callback: (data: any) => void) => void
       onSettingsUpdated: (callback: (settings: any) => void) => void

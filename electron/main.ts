@@ -46,6 +46,40 @@ migrateLegacyUserData()
 
 const store = new Store()
 
+interface AiProfile {
+  id: string
+  title: string
+  apiKey: string
+  apiModel: string
+  apiBaseUrl: string
+}
+
+function migrateLegacyAiProfile() {
+  const profiles = store.get('aiProfiles', null) as AiProfile[] | null
+  if (Array.isArray(profiles) && profiles.length > 0) return
+
+  const legacyKey = store.get('apiKey', '') as string
+  const legacyModel = store.get('apiModel', '') as string
+  const legacyBase = store.get('apiBaseUrl', '') as string
+  if (!legacyKey && !legacyModel && !legacyBase) {
+    store.set('aiProfiles', [])
+    return
+  }
+
+  const id = `p_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+  const profile: AiProfile = {
+    id,
+    title: '默认',
+    apiKey: legacyKey,
+    apiModel: legacyModel || 'doubao-vision-pro',
+    apiBaseUrl: legacyBase || 'https://ark.cn-beijing.volces.com/api/v3'
+  }
+  store.set('aiProfiles', [profile])
+  store.set('activeAiProfileId', id)
+}
+
+migrateLegacyAiProfile()
+
 let mainWindow: BrowserWindow | null = null
 let panelWindow: BrowserWindow | null = null
 let settingsWindow: BrowserWindow | null = null
@@ -440,6 +474,10 @@ function setupIPC() {
   })
 
   ipcMain.handle('get-settings', () => {
+    const profiles = (store.get('aiProfiles', []) as AiProfile[]) || []
+    const activeId = store.get('activeAiProfileId', '') as string
+    const active = profiles.find(p => p.id === activeId) || profiles[0] || null
+
     return {
       screenshotHotkey: store.get('screenshotHotkey', 'Alt+S'),
       fullscreenHotkey: store.get('fullscreenHotkey', 'CommandOrControl+Alt+F'),
@@ -447,17 +485,19 @@ function setupIPC() {
       panelHotkey: store.get('panelHotkey', 'CommandOrControl+Alt+P'),
       autoStart: store.get('autoStart', false),
       panelOpacity: store.get('panelOpacity', 0.95),
-      apiKey: store.get('apiKey', ''),
-      apiModel: store.get('apiModel', 'doubao-vision-pro'),
-      apiBaseUrl: store.get('apiBaseUrl', 'https://ark.cn-beijing.volces.com/api/v3')
+      apiKey: active?.apiKey || '',
+      apiModel: active?.apiModel || 'doubao-vision-pro',
+      apiBaseUrl: active?.apiBaseUrl || 'https://ark.cn-beijing.volces.com/api/v3',
+      aiProfiles: profiles,
+      activeAiProfileId: active?.id || ''
     }
   })
 
   ipcMain.handle('save-settings', (_, settings: any) => {
-    console.log('save-settings called with:', settings)
+    console.log('save-settings called with:', settings ? Object.keys(settings) : settings)
     try {
       Object.keys(settings).forEach(key => {
-        console.log(`Setting ${key}:`, settings[key])
+        if (key === 'apiKey' || key === 'apiModel' || key === 'apiBaseUrl') return
         store.set(key, settings[key])
       })
 
@@ -474,6 +514,24 @@ function setupIPC() {
       return { success: true }
     } catch (error) {
       console.error('Save settings error:', error)
+      return { success: false, error: String(error) }
+    }
+  })
+
+  ipcMain.handle('get-ai-profiles', () => {
+    return {
+      profiles: (store.get('aiProfiles', []) as AiProfile[]) || [],
+      activeId: (store.get('activeAiProfileId', '') as string) || ''
+    }
+  })
+
+  ipcMain.handle('save-ai-profiles', (_, payload: { profiles: AiProfile[]; activeId: string }) => {
+    try {
+      store.set('aiProfiles', payload.profiles || [])
+      store.set('activeAiProfileId', payload.activeId || '')
+      panelWindow?.webContents.send('settings-updated', { aiProfilesUpdated: true })
+      return { success: true }
+    } catch (error) {
       return { success: false, error: String(error) }
     }
   })
@@ -504,7 +562,10 @@ function setupIPC() {
   })
 
   ipcMain.handle('get-api-key', () => {
-    return store.get('apiKey', '')
+    const profiles = (store.get('aiProfiles', []) as AiProfile[]) || []
+    const activeId = store.get('activeAiProfileId', '') as string
+    const active = profiles.find(p => p.id === activeId) || profiles[0]
+    return active?.apiKey || ''
   })
 
   ipcMain.handle('get-version', () => {
@@ -781,6 +842,87 @@ function setupIPC() {
       return panelWindow.getPosition()
     }
     return [0, 0]
+  })
+
+  const aiAbortControllers = new Map<string, AbortController>()
+
+  ipcMain.handle('ai-stream-abort', (_, requestId: string) => {
+    const ctl = aiAbortControllers.get(requestId)
+    if (ctl) {
+      try { ctl.abort() } catch {}
+      aiAbortControllers.delete(requestId)
+    }
+  })
+
+  ipcMain.handle('ai-stream-request', async (event, payload: {
+    requestId: string
+    endpoint: string
+    apiKey: string
+    body: any
+    headers?: Record<string, string>
+  }) => {
+    const { requestId, endpoint, apiKey, body, headers: extraHeaders } = payload
+    const sender = event.sender
+    const ctl = new AbortController()
+    aiAbortControllers.set(requestId, ctl)
+
+    const send = (channel: string, data: any) => {
+      if (!sender.isDestroyed()) sender.send(channel, { requestId, ...data })
+    }
+
+    try {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        ...(extraHeaders || {})
+      }
+      if (!extraHeaders || (!extraHeaders['Authorization'] && !extraHeaders['x-api-key'])) {
+        headers['Authorization'] = `Bearer ${apiKey}`
+      }
+
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: ctl.signal
+      })
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        send('ai-stream-error', { message: `API request failed: ${response.status} - ${errorText}` })
+        return { ok: false }
+      }
+
+      const reader = response.body?.getReader()
+      if (!reader) {
+        send('ai-stream-error', { message: 'No response body' })
+        return { ok: false }
+      }
+
+      const decoder = new TextDecoder()
+      while (true) {
+        if (ctl.signal.aborted) {
+          try { await reader.cancel() } catch {}
+          send('ai-stream-error', { message: 'AbortError', aborted: true })
+          return { ok: false }
+        }
+        const { done, value } = await reader.read()
+        if (done) break
+        const chunk = decoder.decode(value, { stream: true })
+        send('ai-stream-chunk', { chunk })
+      }
+
+      send('ai-stream-done', {})
+      return { ok: true }
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        send('ai-stream-error', { message: 'AbortError', aborted: true })
+      } else {
+        send('ai-stream-error', { message: err?.message || String(err) })
+      }
+      return { ok: false }
+    } finally {
+      aiAbortControllers.delete(requestId)
+    }
   })
 }
 
