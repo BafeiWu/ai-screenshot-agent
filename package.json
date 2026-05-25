@@ -1,6 +1,6 @@
 {
   "name": "ai-screenshot-agent",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Global screenshot + auto‑upload AI desktop tool with floating result panel",
   "main": "dist-electron/main.js",
   "repository": {

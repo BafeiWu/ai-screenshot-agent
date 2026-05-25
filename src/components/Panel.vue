@@ -12,6 +12,8 @@ marked.setOptions({
 const store = useScreenshotStore()
 const messages = ref<FavoriteMessage[]>([])
 const inputText = ref('')
+const uploadedImage = ref<string | null>(null)
+const uploadedImageName = ref('')
 const isLoading = ref(false)
 const isStreaming = ref(false)
 const isHoveringMessages = ref(false)
@@ -339,6 +341,53 @@ const scrollToBottom = () => {
     }
   })
 }
+
+const readImageFileAsDataUrl = (file: File): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(new Error('读取图片失败'))
+    reader.readAsDataURL(file)
+  })
+}
+
+const loadUploadedFile = async (file: File) => {
+  if (!file) return
+
+  if (!file.type.startsWith('image/')) {
+    alert('请选择图片文件')
+    return
+  }
+
+  if (file.size > 8 * 1024 * 1024) {
+    alert('图片不能超过 8MB')
+    return
+  }
+
+  try {
+    uploadedImage.value = await readImageFileAsDataUrl(file)
+    uploadedImageName.value = file.name
+  } catch {
+    alert('图片读取失败')
+  }
+}
+
+const handleUploadClick = () => {
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.accept = 'image/*'
+  input.onchange = () => {
+    const file = input.files?.[0]
+    if (file) loadUploadedFile(file)
+  }
+  input.click()
+}
+
+const clearUploadedImage = () => {
+  uploadedImage.value = null
+  uploadedImageName.value = ''
+}
+
 const resizeStartX = ref(0)
 const resizeStartY = ref(0)
 const resizeStartWidth = ref(0)
@@ -468,7 +517,12 @@ const rerunQuestion = async (content: string, image?: string) => {
 }
 
 const sendMessage = async () => {
-  if (!inputText.value.trim() || isLoading.value) return
+  if ((!inputText.value.trim() && !uploadedImage.value) || isLoading.value) return
+
+  if (agentMode.value && uploadedImage.value) {
+    alert('Agent 模式暂不支持图片上传，请切回普通模式后发送图片')
+    return
+  }
 
   if (agentMode.value && !agentAuthorized.value) {
     pendingAgentInput = inputText.value
@@ -486,13 +540,15 @@ const sendMessage = async () => {
     return
   }
 
-  const userMessage = { role: 'user', content: inputText.value }
+  const userMessage = { role: 'user', content: inputText.value, image: uploadedImage.value || undefined }
   messages.value.push(userMessage)
   messages.value.push({ role: 'assistant', content: '' })
   scrollToBottom()
 
   const currentInput = inputText.value
   inputText.value = ''
+  const currentImage = uploadedImage.value || undefined
+  clearUploadedImage()
   isLoading.value = true
   isStreaming.value = false
   const msgIndex = messages.value.length - 1
@@ -500,7 +556,7 @@ const sendMessage = async () => {
   const signal = abortController.signal
 
   try {
-    const response = await store.sendToAI(currentInput, messages.value, undefined, (token: string) => {
+    const response = await store.sendToAI(currentInput, messages.value, currentImage, (token: string) => {
       isStreaming.value = true
       messages.value[msgIndex].content += token
       scrollToBottom()
@@ -1572,19 +1628,20 @@ onUnmounted(() => {
             <div class="message-avatar">
               {{ msg.role === 'user' ? '👤' : '🤖' }}
             </div>
-            <button
-              v-if="msg.role === 'user'"
-              class="rerun-btn"
-              @click="rerunQuestion(msg.content, msg.image)"
-              title="重新提问"
-            >
-              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path d="M21 12a9 9 0 1 1-2.5-6.2M21 4v6h-6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-            </button>
-            <div class="message-content" v-if="msg.role === 'user'">
-              <img v-if="msg.image" :src="msg.image" class="message-image" @click="openImageViewer(msg.image)" />
-              <div v-if="msg.content" v-html="msg.content"></div>
+            <div v-if="msg.role === 'user'" class="user-message-stack">
+              <button
+                class="rerun-btn"
+                @click="rerunQuestion(msg.content, msg.image)"
+                title="重新提问"
+              >
+                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M21 12a9 9 0 1 1-2.5-6.2M21 4v6h-6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
+              <div class="message-content">
+                <img v-if="msg.image" :src="msg.image" class="message-image" @click="openImageViewer(msg.image)" />
+                <div v-if="msg.content" v-html="msg.content"></div>
+              </div>
             </div>
             <div class="message-content" v-else-if="!msg.content && isLoading">
               <div class="typing-indicator">
@@ -1596,20 +1653,50 @@ onUnmounted(() => {
                 <div
                   v-for="(t, i) in msg.toolEvents"
                   :key="i"
-                  class="agent-tool-pill"
+                  class="agent-workflow-step"
                   :class="t.status"
                 >
-                  <span class="agent-tool-name">{{ t.toolName }}</span>
-                  <span class="agent-tool-target" v-if="t.input?.path || t.input?.from">{{ t.input.path || t.input.from }}</span>
-                  <span class="agent-tool-status">
+                  <div class="agent-step-marker">
+                    <svg v-if="t.status === 'done'" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                      <path d="M20 7L10 17l-5-5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    <span v-else-if="t.status === 'running'"></span>
+                    <svg v-else viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                      <path d="M12 8v4M12 16h.01" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
+                      <path d="M10.3 4.3 2.8 17.2A2 2 0 0 0 4.5 20h15a2 2 0 0 0 1.7-2.8L13.7 4.3a2 2 0 0 0-3.4 0Z" stroke="currentColor" stroke-width="1.8"/>
+                    </svg>
+                  </div>
+                  <div class="agent-step-content">
+                    <div class="agent-step-title-row">
+                      <span class="agent-tool-name">{{ t.toolName }}</span>
+                      <span class="agent-tool-status">
+                        <span v-if="t.status === 'running'">执行中</span>
+                        <span v-else-if="t.status === 'done'">完成</span>
+                        <span v-else>异常</span>
+                      </span>
+                    </div>
+                    <div class="agent-tool-target" v-if="t.input?.path || t.input?.from">{{ t.input.path || t.input.from }}</div>
+                  </div>
+                  <!-- <span class="agent-tool-status">
                     <span v-if="t.status === 'running'">…</span>
                     <span v-else-if="t.status === 'done'">✓</span>
                     <span v-else>✕</span>
                   </span>
+                  </span> -->
                 </div>
               </div>
-              <div class="message-content" v-html="formatText(msg.content)"></div>
-              <div class="message-actions">
+              <div
+                class="message-content"
+                :class="{ 'agent-result-card': msg.toolEvents && msg.toolEvents.length }"
+              >
+                <div v-if="msg.toolEvents && msg.toolEvents.length" class="agent-result-icon">
+                  <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M20 7L10 17l-5-5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                </div>
+                <div class="agent-result-text" v-html="formatText(msg.content)"></div>
+              </div>
+              <div v-if="!msg.toolEvents || !msg.toolEvents.length" class="message-actions">
                 <button
                   v-if="hasTable(msg.content)"
                   class="action-btn"
@@ -1642,10 +1729,35 @@ onUnmounted(() => {
     </div>
 
     <div class="panel-input">
+      <button
+        class="btn-upload"
+        @click="handleUploadClick"
+        :disabled="isLoading || showHistory || showFavorites"
+        title="上传图片"
+      >
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        </svg>
+      </button>
+      <div v-if="uploadedImage" class="upload-preview">
+        <button class="upload-thumb" @click="openImageViewer(uploadedImage)" title="查看图片">
+          <img :src="uploadedImage" :alt="uploadedImageName || '上传图片'" />
+        </button>
+        <div class="upload-meta">
+          <span class="upload-label">已添加图片</span>
+          <span class="upload-name">{{ uploadedImageName }}</span>
+        </div>
+        <button class="upload-remove" @click="clearUploadedImage" title="移除图片">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M18 6 6 18M6 6l12 12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
       <input
+        class="text-input"
         v-model="inputText"
         type="text"
-        placeholder="继续追问..."
+        :placeholder="uploadedImage ? '输入你想基于这张图片提问的内容...' : '继续追问...'"
         :disabled="isLoading || showHistory || showFavorites"
         @keyup.enter="sendMessage"
       />
@@ -1666,8 +1778,9 @@ onUnmounted(() => {
       </button>
       <button
         v-else
+        class="btn-send"
         @click="sendMessage"
-        :disabled="!inputText.trim() || showHistory || showFavorites"
+        :disabled="(!inputText.trim() && !uploadedImage) || showHistory || showFavorites"
       >
         发送
       </button>
@@ -2024,9 +2137,11 @@ onUnmounted(() => {
 .panel-content {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 16px;
   scrollbar-width: thin;
   scrollbar-color: #3a3a5a #1a1a2e;
+  min-width: 0;
 }
 
 .panel-content::-webkit-scrollbar {
@@ -2207,24 +2322,39 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .message {
   display: flex;
   gap: 12px;
   align-items: flex-start;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .message.user {
   flex-direction: row-reverse;
 }
 
+.user-message-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  min-width: 0;
+  max-width: calc(100% - 44px);
+}
+
 .message-wrapper {
   display: flex;
+  flex-direction: column;
   align-items: flex-start;
-  gap: 4px;
+  gap: 8px;
   flex: 1;
   min-width: 0;
+  max-width: calc(100% - 44px);
 }
 
 .message-avatar {
@@ -2260,7 +2390,7 @@ onUnmounted(() => {
 }
 
 .rerun-btn {
-  align-self: center;
+  align-self: flex-end;
   width: 28px;
   height: 28px;
   background: rgba(255, 255, 255, 0.06);
@@ -2293,13 +2423,44 @@ onUnmounted(() => {
 
 .message-content {
   max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   padding: 12px 16px;
   border-radius: 12px;
   line-height: 1.5;
   font-size: 14px;
   white-space: pre-wrap;
   word-break: break-word;
-  overflow-wrap: break-word;
+  overflow-wrap: anywhere;
+}
+
+.message-content :deep(p),
+.message-content :deep(li),
+.message-content :deep(blockquote),
+.message-content :deep(h1),
+.message-content :deep(h2),
+.message-content :deep(h3),
+.message-content :deep(h4),
+.message-content :deep(h5),
+.message-content :deep(h6) {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.message-content :deep(pre) {
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow-x: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.message-content :deep(code) {
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .message-content a {
@@ -2319,6 +2480,8 @@ onUnmounted(() => {
   padding: 8px 12px;
   border: 1px solid #3a3a5a;
   text-align: left;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .message-content table th {
@@ -2328,6 +2491,8 @@ onUnmounted(() => {
 
 .message-content :deep(.table-wrap) {
   margin: 10px 0;
+  max-width: 100%;
+  min-width: 0;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 10px;
   overflow: hidden;
@@ -2352,12 +2517,18 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
   padding: 6px 8px 6px 14px;
   background: #1d2844;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .message-content :deep(.table-toolbar-label) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 12px;
   font-weight: 600;
   color: rgba(255, 255, 255, 0.65);
@@ -2403,6 +2574,8 @@ onUnmounted(() => {
 }
 
 .message-content :deep(.table-scroll) {
+  max-width: 100%;
+  min-width: 0;
   overflow-x: auto;
 }
 
@@ -2423,6 +2596,8 @@ onUnmounted(() => {
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
   text-align: left;
   vertical-align: top;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .message-content :deep(.downloadable-table td:last-child),
@@ -2463,6 +2638,49 @@ onUnmounted(() => {
   border-bottom-left-radius: 4px;
   position: relative;
   padding-right: 40px;
+  width: fit-content;
+}
+
+.message.assistant .message-content.agent-result-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  max-width: min(420px, 100%);
+  padding: 14px 16px;
+  padding-right: 42px;
+  background: linear-gradient(135deg, rgba(34, 197, 94, 0.1), rgba(56, 189, 248, 0.06));
+  border: 1px solid rgba(74, 222, 128, 0.22);
+  border-radius: 12px;
+  border-bottom-left-radius: 4px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.18);
+}
+
+.agent-result-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin-top: 1px;
+  color: #0f172a;
+  background: #72d98b;
+  border-radius: 50%;
+  box-shadow: 0 0 0 5px rgba(114, 217, 139, 0.12);
+  flex-shrink: 0;
+}
+
+.agent-result-icon svg {
+  width: 15px;
+  height: 15px;
+}
+
+.agent-result-text {
+  min-width: 0;
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.agent-result-text :deep(p) {
+  margin: 0;
 }
 
 .typing-indicator {
@@ -2500,13 +2718,129 @@ onUnmounted(() => {
 
 .panel-input {
   display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 12px 16px;
   background: #16213e;
+  min-width: 0;
 }
 
-.panel-input input {
+.panel-input .btn-upload {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  flex-shrink: 0;
+  background: #1f2849;
+  border: 1px solid #2a2a4a;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.panel-input .btn-upload:hover:not(:disabled) {
+  opacity: 1;
+  border-color: rgba(233, 69, 96, 0.55);
+  color: #ffffff;
+  background: rgba(233, 69, 96, 0.16);
+}
+
+.btn-upload svg {
+  width: 18px;
+  height: 18px;
+}
+
+.upload-preview {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  order: -1;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  min-height: 68px;
+  padding: 8px;
+  background: rgba(31, 40, 73, 0.72);
+  border: 1px solid rgba(124, 137, 200, 0.18);
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+
+.panel-input .upload-thumb {
+  display: inline-flex;
+  width: 52px;
+  height: 52px;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  flex-shrink: 0;
+  cursor: zoom-in;
+}
+
+.upload-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.upload-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
   flex: 1;
+}
+
+.upload-label {
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.upload-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: rgba(255, 255, 255, 0.56);
+  font-size: 12px;
+}
+
+.upload-preview img {
+  flex-shrink: 0;
+}
+
+.panel-input .upload-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.55);
+  flex-shrink: 0;
+}
+
+.panel-input .upload-remove:hover:not(:disabled) {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+}
+
+.upload-remove svg {
+  width: 13px;
+  height: 13px;
+}
+
+.panel-input .text-input {
+  flex: 1;
+  flex-basis: 0;
+  min-width: 0;
   background: #1f2849;
   border: 1px solid #2a2a4a;
   border-radius: 8px;
@@ -2516,31 +2850,41 @@ onUnmounted(() => {
   outline: none;
 }
 
-.panel-input input:focus {
+.panel-input .text-input:focus {
   border-color: #e94560;
 }
 
-.panel-input input:disabled {
+.panel-input .text-input:disabled {
   opacity: 0.5;
 }
 
-.panel-input button {
+.panel-input .btn-send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 84px;
+  height: 40px;
+  min-width: 84px;
+  flex: 0 0 84px;
   background: #e94560;
   border: none;
   border-radius: 8px;
-  padding: 10px 20px;
+  padding: 0 18px;
   color: #fff;
   font-size: 14px;
+  line-height: 1;
+  white-space: nowrap;
   cursor: pointer;
   transition: opacity 0.2s;
 }
 
-.panel-input button:disabled {
+.panel-input .btn-send:disabled,
+.panel-input .btn-upload:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
-.panel-input button:hover:not(:disabled) {
+.panel-input .btn-send:hover:not(:disabled) {
   opacity: 0.9;
 }
 
@@ -2597,6 +2941,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
 }
 
 .btn-favorite:hover:not(:disabled) {
@@ -2835,6 +3180,18 @@ onUnmounted(() => {
   z-index: 1000;
 }
 
+.dialog-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  background: rgba(8, 12, 28, 0.62);
+  backdrop-filter: blur(10px);
+}
+
 .dialog {
   background: #1f2849;
   border-radius: 12px;
@@ -3068,105 +3425,239 @@ onUnmounted(() => {
 .agent-tool-events {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  margin-bottom: 8px;
+  gap: 0;
+  width: min(390px, 100%);
+  margin: 2px 0 4px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
 }
 
-.agent-tool-pill {
+.agent-workflow-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-width: 0;
+  position: relative;
+  padding: 0 0 14px;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 12px;
+}
+
+.agent-workflow-step:last-child {
+  padding-bottom: 0;
+}
+
+.agent-workflow-step::before {
+  content: "";
+  position: absolute;
+  left: 11px;
+  top: 26px;
+  bottom: 4px;
+  width: 1px;
+  background: linear-gradient(180deg, rgba(114, 217, 139, 0.42), rgba(255, 255, 255, 0.08));
+}
+
+.agent-workflow-step:last-child::before {
+  display: none;
+}
+
+.agent-step-marker {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-top: 1px;
+  border-radius: 50%;
+  color: #102018;
+  background: #72d98b;
+  box-shadow: 0 0 0 4px rgba(114, 217, 139, 0.11);
+  flex-shrink: 0;
+  z-index: 1;
+}
+
+.agent-step-marker svg {
+  width: 13px;
+  height: 13px;
+}
+
+.agent-step-marker span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.agent-workflow-step.running .agent-step-marker {
+  color: #ffffff;
+  background: #ff7b96;
+  box-shadow: 0 0 0 4px rgba(255, 107, 139, 0.12);
+}
+
+.agent-workflow-step.error .agent-step-marker {
+  color: #ffffff;
+  background: #f87171;
+  box-shadow: 0 0 0 4px rgba(248, 113, 113, 0.12);
+}
+
+.agent-step-content {
+  min-width: 0;
+  flex: 1;
+  padding: 7px 10px 8px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.065);
+  border-radius: 9px;
+}
+
+.agent-step-title-row {
+  display: flex;
+  align-items: center;
   gap: 8px;
-  padding: 4px 10px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 12px;
-  font-size: 11px;
-  color: #ccc;
-  max-width: 100%;
-}
-
-.agent-tool-pill.running {
-  border-color: rgba(255, 107, 139, 0.4);
-}
-
-.agent-tool-pill.done {
-  border-color: rgba(74, 222, 128, 0.4);
-}
-
-.agent-tool-pill.error {
-  border-color: rgba(248, 113, 113, 0.4);
-  color: #f87171;
+  min-width: 0;
+  margin-bottom: 4px;
 }
 
 .agent-tool-name {
-  color: #ff6b8b;
-  font-weight: 500;
+  color: #ff7b96;
+  font-weight: 700;
+  flex-shrink: 0;
 }
 
-.agent-tool-pill.error .agent-tool-name {
+.agent-workflow-step.error .agent-tool-name {
   color: #f87171;
 }
 
 .agent-tool-target {
-  color: #999;
+  min-width: 0;
+  color: rgba(255, 255, 255, 0.52);
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 11px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 320px;
 }
 
 .agent-tool-status {
   margin-left: auto;
-  color: #888;
+  color: #72d98b;
+  flex-shrink: 0;
+  font-size: 11px;
+}
+
+.agent-workflow-step.running .agent-tool-status {
+  color: #ff9aae;
+}
+
+.agent-workflow-step.error .agent-tool-status {
+  color: #f87171;
 }
 
 .agent-auth-dialog {
-  max-width: 520px;
+  width: min(440px, 100%);
+  max-width: 440px;
+  padding: 22px 24px 20px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: #20294d;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
+}
+
+.agent-auth-dialog .dialog-title {
+  margin-bottom: 14px;
+  color: #ffffff;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.35;
+  letter-spacing: 0;
 }
 
 .agent-auth-body {
-  padding: 0 4px;
+  padding: 0;
 }
 
 .agent-auth-tip {
+  margin-bottom: 14px;
+  color: rgba(255, 255, 255, 0.78);
   font-size: 13px;
-  color: #ccc;
-  margin-bottom: 12px;
+  line-height: 1.6;
 }
 
 .agent-auth-empty {
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  color: #fecaca;
   font-size: 12px;
-  color: #f87171;
-  padding: 12px;
-  background: rgba(248, 113, 113, 0.08);
-  border-radius: 6px;
-  margin-bottom: 12px;
+  line-height: 1.5;
+  background: rgba(248, 113, 113, 0.1);
+  border: 1px solid rgba(248, 113, 113, 0.18);
+  border-radius: 8px;
 }
 
 .agent-auth-dirs {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  max-height: 180px;
+  gap: 8px;
+  max-height: 170px;
   overflow-y: auto;
-  margin-bottom: 12px;
+  margin-bottom: 14px;
+  padding-right: 2px;
 }
 
 .agent-auth-dir {
+  padding: 10px 12px;
+  color: rgba(255, 255, 255, 0.86);
+  font-family: Consolas, "SFMono-Regular", monospace;
   font-size: 12px;
-  color: #ccc;
-  padding: 6px 10px;
-  background: rgba(255, 255, 255, 0.04);
-  border-radius: 4px;
+  line-height: 1.35;
+  background: rgba(255, 255, 255, 0.055);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
   word-break: break-all;
 }
 
 .agent-auth-warn {
-  font-size: 11px;
-  color: #f59e0b;
-  padding: 8px 10px;
-  background: rgba(245, 158, 11, 0.08);
-  border-radius: 4px;
+  padding: 10px 12px;
+  color: #fbbf24;
+  font-size: 12px;
   line-height: 1.5;
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.16);
+  border-radius: 8px;
+}
+
+.agent-auth-dialog .dialog-footer {
+  margin-top: 18px;
+  gap: 10px;
+}
+
+.agent-auth-dialog .btn-cancel,
+.agent-auth-dialog .btn-confirm {
+  min-width: 94px;
+  height: 38px;
+  padding: 0 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.agent-auth-dialog .btn-cancel {
+  color: rgba(255, 255, 255, 0.62);
+  background: rgba(255, 255, 255, 0.03);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.agent-auth-dialog .btn-cancel:hover {
+  color: #ffffff;
+  border-color: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.agent-auth-dialog .btn-confirm {
+  background: #e94560;
+}
+
+.agent-auth-dialog .btn-confirm:hover:not(:disabled) {
+  background: #f0526d;
 }
 </style>
