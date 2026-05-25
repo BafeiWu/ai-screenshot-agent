@@ -1572,14 +1572,19 @@ onUnmounted(() => {
             <div class="message-avatar">
               {{ msg.role === 'user' ? '👤' : '🤖' }}
             </div>
+            <button
+              v-if="msg.role === 'user'"
+              class="rerun-btn"
+              @click="rerunQuestion(msg.content, msg.image)"
+              title="重新提问"
+            >
+              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M21 12a9 9 0 1 1-2.5-6.2M21 4v6h-6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
             <div class="message-content" v-if="msg.role === 'user'">
               <img v-if="msg.image" :src="msg.image" class="message-image" @click="openImageViewer(msg.image)" />
               <div v-if="msg.content" v-html="msg.content"></div>
-              <button class="rerun-btn" @click="rerunQuestion(msg.content, msg.image)" title="重新提问">
-                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <path d="M21 12a9 9 0 1 1-2.5-6.2M21 4v6h-6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-              </button>
             </div>
             <div class="message-content" v-else-if="!msg.content && isLoading">
               <div class="typing-indicator">
@@ -2232,6 +2237,7 @@ onUnmounted(() => {
   justify-content: center;
   font-size: 14px;
   flex-shrink: 0;
+  position: relative;
 }
 
 .message.assistant .message-avatar {
@@ -2254,29 +2260,34 @@ onUnmounted(() => {
 }
 
 .rerun-btn {
-  position: absolute;
-  right: 8px;
-  top: 8px;
-  background: rgba(255, 255, 255, 0.1);
-  border: none;
+  align-self: center;
+  width: 28px;
+  height: 28px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 6px;
-  padding: 6px;
+  padding: 0;
   cursor: pointer;
-  opacity: 0.6;
-  transition: opacity 0.2s, background 0.2s;
+  opacity: 0;
+  transition: opacity 0.2s, background 0.2s, border-color 0.2s;
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
+}
+
+.message:hover .rerun-btn {
+  opacity: 1;
 }
 
 .rerun-btn:hover {
-  opacity: 1;
-  background: rgba(255, 255, 255, 0.2);
+  background: rgba(233, 69, 96, 0.15);
+  border-color: #e94560;
 }
 
 .rerun-btn svg {
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
   color: #c86b7d;
 }
 

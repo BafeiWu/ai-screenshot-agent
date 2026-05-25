@@ -12,7 +12,10 @@
     "build": "vite build",
     "preview": "vite preview",
     "electron:dev": "vite build && electron .",
-    "electron:build": "vite build && electron-builder"
+    "electron:build": "vite build && electron-builder",
+    "electron:build:mac": "vite build && electron-builder --mac",
+    "electron:build:mac:arm": "vite build && electron-builder --mac --arm64",
+    "electron:build:mac:x64": "vite build && electron-builder --mac --x64"
   },
   "keywords": [
     "electron",
@@ -52,6 +55,26 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["arm64", "x64"]
+        },
+        {
+          "target": "zip",
+          "arch": ["arm64", "x64"]
+        }
+      ],
+      "icon": "./icon.png",
+      "identity": null,
+      "category": "public.app-category.productivity",
+      "artifactName": "ai-screenshot-agent-${version}-${arch}.${ext}"
+    },
+    "dmg": {
+      "title": "SnapAI ${version}",
+      "writeUpdateInfo": false
     },
     "files": [
       "dist/**/*",
