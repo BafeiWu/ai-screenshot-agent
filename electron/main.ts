@@ -88,6 +88,8 @@ let pendingScreenshotImage: string = ''
 const pinnedWindows = new Set<BrowserWindow>()
 const pinnedWindowImages = new WeakMap<BrowserWindow, string>()
 const pinnedDragLock = new WeakMap<BrowserWindow, { width: number; height: number }>()
+const PANEL_MIN_WIDTH = 400
+const PANEL_MIN_HEIGHT = 600
 let tray: Tray | null = null
 
 const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL
@@ -179,9 +181,11 @@ function createPanelWindow() {
   const { width, height } = primaryDisplay.workAreaSize
 
   panelWindow = new BrowserWindow({
-    width: 400,
-    height: Math.min(600, Math.floor(height * 0.7)),
-    x: width - 420,
+    width: PANEL_MIN_WIDTH,
+    height: PANEL_MIN_HEIGHT,
+    minWidth: PANEL_MIN_WIDTH,
+    minHeight: PANEL_MIN_HEIGHT,
+    x: width - PANEL_MIN_WIDTH - 20,
     y: 100,
     frame: false,
     transparent: false,
@@ -460,11 +464,9 @@ function setupIPC() {
 
   ipcMain.handle('resize-panel', (_, width: number, height: number) => {
     if (panelWindow) {
-      const minWidth = 300
-      const minHeight = 400
       panelWindow.setSize(
-        Math.max(minWidth, Math.round(width)),
-        Math.max(minHeight, Math.round(height))
+        Math.max(PANEL_MIN_WIDTH, Math.round(width)),
+        Math.max(PANEL_MIN_HEIGHT, Math.round(height))
       )
     }
   })

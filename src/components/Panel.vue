@@ -393,8 +393,8 @@ const resizeStartY = ref(0)
 const resizeStartWidth = ref(0)
 const resizeStartHeight = ref(0)
 
-const MIN_WIDTH = 300
-const MIN_HEIGHT = 400
+const MIN_WIDTH = 400
+const MIN_HEIGHT = 600
 
 const startResize = async (corner: string, e: MouseEvent) => {
   e.preventDefault()
@@ -403,8 +403,8 @@ const startResize = async (corner: string, e: MouseEvent) => {
   resizeCorner.value = corner
   resizeStartX.value = e.screenX
   resizeStartY.value = e.screenY
-  resizeStartWidth.value = 400
-  resizeStartHeight.value = 600
+  resizeStartWidth.value = window.innerWidth
+  resizeStartHeight.value = window.innerHeight
 
   document.addEventListener('mousemove', handleResize)
   document.addEventListener('mouseup', handleResizeEnd)
@@ -419,35 +419,21 @@ const handleResize = async (e: MouseEvent) => {
   let newWidth = resizeStartWidth.value
   let newHeight = resizeStartHeight.value
 
-  const isCorner = (resizeCorner.value.includes('left') || resizeCorner.value.includes('right')) &&
-                    (resizeCorner.value.includes('top') || resizeCorner.value.includes('bottom'))
-
-  if (isCorner) {
-    const aspectRatio = resizeStartWidth.value / resizeStartHeight.value
-    const moveX = resizeCorner.value.includes('left') ? -deltaX : deltaX
-    const moveY = resizeCorner.value.includes('top') ? -deltaY : deltaY
-    const move = Math.max(Math.abs(moveX), Math.abs(moveY))
-
-    if (resizeCorner.value.includes('right')) {
-      newWidth = Math.max(MIN_WIDTH, resizeStartWidth.value + move)
-    } else {
-      newWidth = Math.max(MIN_WIDTH, resizeStartWidth.value - move)
-    }
-    newHeight = Math.max(MIN_HEIGHT, newWidth / aspectRatio)
-  } else {
-    if (resizeCorner.value.includes('right')) {
-      newWidth = Math.max(MIN_WIDTH, resizeStartWidth.value + deltaX)
-    }
-    if (resizeCorner.value.includes('left')) {
-      newWidth = Math.max(MIN_WIDTH, resizeStartWidth.value - deltaX)
-    }
-    if (resizeCorner.value.includes('bottom')) {
-      newHeight = Math.max(MIN_HEIGHT, resizeStartHeight.value + deltaY)
-    }
-    if (resizeCorner.value.includes('top')) {
-      newHeight = Math.max(MIN_HEIGHT, resizeStartHeight.value - deltaY)
-    }
+  if (resizeCorner.value.includes('right')) {
+    newWidth = resizeStartWidth.value + deltaX
   }
+  if (resizeCorner.value.includes('left')) {
+    newWidth = resizeStartWidth.value - deltaX
+  }
+  if (resizeCorner.value.includes('bottom')) {
+    newHeight = resizeStartHeight.value + deltaY
+  }
+  if (resizeCorner.value.includes('top')) {
+    newHeight = resizeStartHeight.value - deltaY
+  }
+
+  newWidth = Math.max(MIN_WIDTH, newWidth)
+  newHeight = Math.max(MIN_HEIGHT, newHeight)
 
   window.electronAPI.resizePanel(Math.round(newWidth), Math.round(newHeight))
 }
