@@ -185,10 +185,12 @@ const annotationToolbarStyle = computed(() => {
   const vh = window.innerHeight
   const tbW = annotToolbarSize.value.w
   const tbH = annotToolbarSize.value.h
+  const maxTbW = Math.max(0, vw - 16)
+  const layoutTbW = Math.min(tbW, maxTbW)
   const gap = 8
 
   let top: number
-  let left = s.x + (s.width - tbW) / 2
+  let left = s.x + (s.width - layoutTbW) / 2
 
   if (visible) {
     if (s.y + s.height + gap + tbH <= vh - BOTTOM_SAFE) {
@@ -202,8 +204,12 @@ const annotationToolbarStyle = computed(() => {
     top = -9999
   }
 
-  if (left < 8) left = 8
-  if (left + tbW > vw - 8) left = vw - tbW - 8
+  if (tbW >= maxTbW) {
+    left = 8
+  } else {
+    if (left < 8) left = 8
+    if (left + tbW > vw - 8) left = vw - tbW - 8
+  }
 
   return {
     top: top + 'px',
@@ -445,6 +451,7 @@ const onMouseUp = () => {
 
   if (mode.value === 'select') {
     if (hasSelection.value) {
+      mode.value = 'annotate'
     } else {
       selection.value = { x: 0, y: 0, width: 0, height: 0 }
     }
@@ -1351,6 +1358,9 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 6px;
+  max-width: calc(100vw - 16px);
+  overflow-x: auto;
+  overflow-y: hidden;
   background: rgba(28, 28, 35, 0.96);
   backdrop-filter: blur(12px);
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -1363,9 +1373,15 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 4px;
+  flex: 0 0 auto;
+}
+
+.annot-toolbar::-webkit-scrollbar {
+  display: none;
 }
 
 .annot-toolbar .divider {
+  flex: 0 0 auto;
   width: 1px;
   height: 22px;
   background: rgba(255, 255, 255, 0.1);
@@ -1376,6 +1392,7 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex: 0 0 auto;
   width: 30px;
   height: 30px;
   background: transparent;
@@ -1609,6 +1626,8 @@ onUnmounted(() => {
 
 .translate-btn {
   width: auto !important;
+  min-width: 72px;
+  flex: 0 0 auto;
   padding: 0 10px;
   gap: 6px;
   background: rgba(184, 90, 107, 0.18);
@@ -1628,6 +1647,7 @@ onUnmounted(() => {
 .translate-label {
   font-size: 12px;
   font-weight: 500;
+  white-space: nowrap;
 }
 
 .copy-btn.flashed {

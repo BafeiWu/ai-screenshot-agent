@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, Tray, Menu, nativeImage, screen, desktopCapturer, dialog, Notification, clipboard } from 'electron'
+import { app, BrowserWindow, globalShortcut, ipcMain, Tray, Menu, nativeImage, screen, desktopCapturer, dialog, Notification, clipboard, shell } from 'electron'
 import path from 'path'
 import fs from 'fs'
 import Store from 'electron-store'
@@ -45,6 +45,40 @@ function migrateLegacyUserData() {
 migrateLegacyUserData()
 
 const store = new Store()
+
+interface AiProfile {
+  id: string
+  title: string
+  apiKey: string
+  apiModel: string
+  apiBaseUrl: string
+}
+
+function migrateLegacyAiProfile() {
+  const profiles = store.get('aiProfiles', null) as AiProfile[] | null
+  if (Array.isArray(profiles) && profiles.length > 0) return
+
+  const legacyKey = store.get('apiKey', '') as string
+  const legacyModel = store.get('apiModel', '') as string
+  const legacyBase = store.get('apiBaseUrl', '') as string
+  if (!legacyKey && !legacyModel && !legacyBase) {
+    store.set('aiProfiles', [])
+    return
+  }
+
+  const id = `p_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+  const profile: AiProfile = {
+    id,
+    title: '默认',
+    apiKey: legacyKey,
+    apiModel: legacyModel || 'doubao-vision-pro',
+    apiBaseUrl: legacyBase || 'https://ark.cn-beijing.volces.com/api/v3'
+  }
+  store.set('aiProfiles', [profile])
+  store.set('activeAiProfileId', id)
+}
+
+migrateLegacyAiProfile()
 
 let mainWindow: BrowserWindow | null = null
 let panelWindow: BrowserWindow | null = null
@@ -284,11 +318,13 @@ function buildTrayMenu() {
   const screenshotHotkey = formatHotkey(store.get('screenshotHotkey', 'Alt+S') as string)
   const fullscreenHotkey = formatHotkey(store.get('fullscreenHotkey', 'CommandOrControl+Alt+F') as string)
   const windowHotkey = formatHotkey(store.get('windowHotkey', 'CommandOrControl+Alt+W') as string)
+  const panelHotkey = formatHotkey(store.get('panelHotkey', 'CommandOrControl+Alt+P') as string)
 
   const contextMenu = Menu.buildFromTemplate([
     { label: `截图 (${screenshotHotkey})`, click: () => createScreenshotWindow() },
     { label: `全屏截图 (${fullscreenHotkey})`, click: () => takeFullscreenScreenshot() },
     { label: `窗口截图 (${windowHotkey})`, click: () => takeWindowScreenshot() },
+    { label: `调出面板 (${panelHotkey})`, click: () => createPanelWindow() },
     { type: 'separator' },
     { label: '显示面板', click: () => createPanelWindow() },
     { label: '隐藏面板', click: () => panelWindow?.hide() },
@@ -366,6 +402,7 @@ function registerShortcuts() {
     const screenshotHotkey = store.get('screenshotHotkey', 'Alt+S') as string
     const fullscreenHotkey = store.get('fullscreenHotkey', 'CommandOrControl+Alt+F') as string
     const windowHotkey = store.get('windowHotkey', 'CommandOrControl+Alt+W') as string
+    const panelHotkey = store.get('panelHotkey', 'CommandOrControl+Alt+P') as string
 
     globalShortcut.unregisterAll()
 
@@ -382,7 +419,15 @@ function registerShortcuts() {
       takeWindowScreenshot()
     })
 
-    console.log('Shortcuts registered:', registered1, registered2, registered3)
+    const registered4 = globalShortcut.register(panelHotkey, () => {
+      if (panelWindow?.isVisible()) {
+        panelWindow.hide()
+      } else {
+        createPanelWindow()
+      }
+    })
+
+    console.log('Shortcuts registered:', registered1, registered2, registered3, registered4)
   } catch (error) {
     console.error('Failed to register shortcuts:', error)
   }
@@ -429,23 +474,30 @@ function setupIPC() {
   })
 
   ipcMain.handle('get-settings', () => {
+    const profiles = (store.get('aiProfiles', []) as AiProfile[]) || []
+    const activeId = store.get('activeAiProfileId', '') as string
+    const active = profiles.find(p => p.id === activeId) || profiles[0] || null
+
     return {
       screenshotHotkey: store.get('screenshotHotkey', 'Alt+S'),
       fullscreenHotkey: store.get('fullscreenHotkey', 'CommandOrControl+Alt+F'),
       windowHotkey: store.get('windowHotkey', 'CommandOrControl+Alt+W'),
+      panelHotkey: store.get('panelHotkey', 'CommandOrControl+Alt+P'),
       autoStart: store.get('autoStart', false),
       panelOpacity: store.get('panelOpacity', 0.95),
-      apiKey: store.get('apiKey', ''),
-      apiModel: store.get('apiModel', 'doubao-vision-pro'),
-      apiBaseUrl: store.get('apiBaseUrl', 'https://ark.cn-beijing.volces.com/api/v3')
+      apiKey: active?.apiKey || '',
+      apiModel: active?.apiModel || 'doubao-vision-pro',
+      apiBaseUrl: active?.apiBaseUrl || 'https://ark.cn-beijing.volces.com/api/v3',
+      aiProfiles: profiles,
+      activeAiProfileId: active?.id || ''
     }
   })
 
   ipcMain.handle('save-settings', (_, settings: any) => {
-    console.log('save-settings called with:', settings)
+    console.log('save-settings called with:', settings ? Object.keys(settings) : settings)
     try {
       Object.keys(settings).forEach(key => {
-        console.log(`Setting ${key}:`, settings[key])
+        if (key === 'apiKey' || key === 'apiModel' || key === 'apiBaseUrl') return
         store.set(key, settings[key])
       })
 
@@ -462,6 +514,24 @@ function setupIPC() {
       return { success: true }
     } catch (error) {
       console.error('Save settings error:', error)
+      return { success: false, error: String(error) }
+    }
+  })
+
+  ipcMain.handle('get-ai-profiles', () => {
+    return {
+      profiles: (store.get('aiProfiles', []) as AiProfile[]) || [],
+      activeId: (store.get('activeAiProfileId', '') as string) || ''
+    }
+  })
+
+  ipcMain.handle('save-ai-profiles', (_, payload: { profiles: AiProfile[]; activeId: string }) => {
+    try {
+      store.set('aiProfiles', payload.profiles || [])
+      store.set('activeAiProfileId', payload.activeId || '')
+      panelWindow?.webContents.send('settings-updated', { aiProfilesUpdated: true })
+      return { success: true }
+    } catch (error) {
       return { success: false, error: String(error) }
     }
   })
@@ -492,7 +562,10 @@ function setupIPC() {
   })
 
   ipcMain.handle('get-api-key', () => {
-    return store.get('apiKey', '')
+    const profiles = (store.get('aiProfiles', []) as AiProfile[]) || []
+    const activeId = store.get('activeAiProfileId', '') as string
+    const active = profiles.find(p => p.id === activeId) || profiles[0]
+    return active?.apiKey || ''
   })
 
   ipcMain.handle('get-version', () => {
@@ -769,6 +842,347 @@ function setupIPC() {
       return panelWindow.getPosition()
     }
     return [0, 0]
+  })
+
+  const aiAbortControllers = new Map<string, AbortController>()
+
+  ipcMain.handle('ai-stream-abort', (_, requestId: string) => {
+    const ctl = aiAbortControllers.get(requestId)
+    if (ctl) {
+      try { ctl.abort() } catch {}
+      aiAbortControllers.delete(requestId)
+    }
+  })
+
+  ipcMain.handle('ai-stream-request', async (event, payload: {
+    requestId: string
+    endpoint: string
+    apiKey: string
+    body: any
+    headers?: Record<string, string>
+  }) => {
+    const { requestId, endpoint, apiKey, body, headers: extraHeaders } = payload
+    const sender = event.sender
+    const ctl = new AbortController()
+    aiAbortControllers.set(requestId, ctl)
+
+    const send = (channel: string, data: any) => {
+      if (!sender.isDestroyed()) sender.send(channel, { requestId, ...data })
+    }
+
+    try {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        ...(extraHeaders || {})
+      }
+      if (!extraHeaders || (!extraHeaders['Authorization'] && !extraHeaders['x-api-key'])) {
+        headers['Authorization'] = `Bearer ${apiKey}`
+      }
+
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: ctl.signal
+      })
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        send('ai-stream-error', { message: `API request failed: ${response.status} - ${errorText}` })
+        return { ok: false }
+      }
+
+      const reader = response.body?.getReader()
+      if (!reader) {
+        send('ai-stream-error', { message: 'No response body' })
+        return { ok: false }
+      }
+
+      const decoder = new TextDecoder()
+      while (true) {
+        if (ctl.signal.aborted) {
+          try { await reader.cancel() } catch {}
+          send('ai-stream-error', { message: 'AbortError', aborted: true })
+          return { ok: false }
+        }
+        const { done, value } = await reader.read()
+        if (done) break
+        const chunk = decoder.decode(value, { stream: true })
+        send('ai-stream-chunk', { chunk })
+      }
+
+      send('ai-stream-done', {})
+      return { ok: true }
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        send('ai-stream-error', { message: 'AbortError', aborted: true })
+      } else {
+        send('ai-stream-error', { message: err?.message || String(err) })
+      }
+      return { ok: false }
+    } finally {
+      aiAbortControllers.delete(requestId)
+    }
+  })
+
+  ipcMain.handle('agent-get-allowed-dirs', () => {
+    return (store.get('agentAllowedDirs', []) as string[]) || []
+  })
+
+  ipcMain.handle('agent-set-allowed-dirs', (_, dirs: string[]) => {
+    const clean = (dirs || []).filter(d => typeof d === 'string' && d.trim()).map(d => path.resolve(d))
+    store.set('agentAllowedDirs', clean)
+    return { success: true, dirs: clean }
+  })
+
+  ipcMain.handle('agent-pick-directory', async () => {
+    const targetWindow = settingsWindow || panelWindow || mainWindow
+    if (!targetWindow) return { canceled: true }
+    const result = await dialog.showOpenDialog(targetWindow, {
+      properties: ['openDirectory']
+    })
+    if (result.canceled || !result.filePaths[0]) return { canceled: true }
+    return { canceled: false, path: result.filePaths[0] }
+  })
+
+  const ensureAllowed = (target: string): { ok: true; resolved: string } | { ok: false; error: string } => {
+    const allowed = (store.get('agentAllowedDirs', []) as string[]) || []
+    if (!allowed.length) return { ok: false, error: '未配置允许目录,请先在设置里添加' }
+    let resolved: string
+    try {
+      resolved = fs.realpathSync(path.resolve(target))
+    } catch {
+      resolved = path.resolve(target)
+    }
+    const inside = allowed.some(dir => {
+      try {
+        const realDir = fs.realpathSync(dir)
+        const rel = path.relative(realDir, resolved)
+        return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
+      } catch {
+        return false
+      }
+    })
+    if (!inside) return { ok: false, error: `路径不在允许范围内: ${target}` }
+    return { ok: true, resolved }
+  }
+
+  const parseHttpUrl = (raw: string): URL | null => {
+    try {
+      const u = new URL(raw)
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return null
+      return u
+    } catch {
+      return null
+    }
+  }
+
+  const stripHtml = (html: string): string => {
+    return html
+      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/\s+/g, ' ')
+      .trim()
+  }
+
+  const extractLinks = (html: string, baseUrl: string) => {
+    const links: Array<{ url: string; text: string }> = []
+    const re = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi
+    let m: RegExpExecArray | null
+    while ((m = re.exec(html)) && links.length < 200) {
+      try {
+        const url = new URL(m[1], baseUrl).toString()
+        const text = stripHtml(m[2]).slice(0, 160)
+        if (url.startsWith('http://') || url.startsWith('https://')) links.push({ url, text })
+      } catch {}
+    }
+    return links
+  }
+
+  ipcMain.handle('agent-tool-fetch-url', async (_, args: { url: string }) => {
+    const u = parseHttpUrl(String(args.url || ''))
+    if (!u) return { error: '仅支持 http/https URL' }
+    try {
+      const res = await fetch(u.toString(), {
+        headers: {
+          'user-agent': 'Mozilla/5.0 SnapAI-Agent/1.0'
+        }
+      })
+      const contentType = res.headers.get('content-type') || ''
+      const text = await res.text()
+      const limited = text.slice(0, 500_000)
+      const title = limited.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.replace(/\s+/g, ' ').trim() || ''
+      return {
+        url: u.toString(),
+        status: res.status,
+        contentType,
+        title,
+        text: contentType.includes('html') ? stripHtml(limited).slice(0, 80_000) : limited.slice(0, 80_000),
+        truncated: text.length > limited.length
+      }
+    } catch (e: any) {
+      return { error: e?.message || String(e) }
+    }
+  })
+
+  ipcMain.handle('agent-tool-extract-links', async (_, args: { url: string }) => {
+    const u = parseHttpUrl(String(args.url || ''))
+    if (!u) return { error: '仅支持 http/https URL' }
+    try {
+      const res = await fetch(u.toString(), {
+        headers: {
+          'user-agent': 'Mozilla/5.0 SnapAI-Agent/1.0'
+        }
+      })
+      const html = await res.text()
+      return {
+        url: u.toString(),
+        status: res.status,
+        links: extractLinks(html.slice(0, 1_500_000), u.toString())
+      }
+    } catch (e: any) {
+      return { error: e?.message || String(e) }
+    }
+  })
+
+  ipcMain.handle('agent-tool-download-url', async (_, args: { url: string; path: string }) => {
+    const u = parseHttpUrl(String(args.url || ''))
+    if (!u) return { error: '仅支持 http/https URL' }
+    const check = ensureAllowed(String(args.path || ''))
+    if (!check.ok) return { error: check.error }
+    try {
+      const res = await fetch(u.toString(), {
+        headers: {
+          'user-agent': 'Mozilla/5.0 SnapAI-Agent/1.0'
+        }
+      })
+      if (!res.ok) return { error: `下载失败: HTTP ${res.status}` }
+      const contentLength = Number(res.headers.get('content-length') || 0)
+      if (contentLength > 100 * 1024 * 1024) return { error: '文件超过 100MB, 已拒绝下载' }
+      const bytes = Buffer.from(await res.arrayBuffer())
+      if (bytes.byteLength > 100 * 1024 * 1024) return { error: '文件超过 100MB, 已拒绝下载' }
+      fs.mkdirSync(path.dirname(check.resolved), { recursive: true })
+      fs.writeFileSync(check.resolved, bytes)
+      return {
+        success: true,
+        url: u.toString(),
+        path: check.resolved,
+        bytes: bytes.byteLength,
+        contentType: res.headers.get('content-type') || ''
+      }
+    } catch (e: any) {
+      return { error: e?.message || String(e) }
+    }
+  })
+
+  ipcMain.handle('agent-tool-read-file', async (_, args: { path: string }) => {
+    const check = ensureAllowed(args.path)
+    if (!check.ok) return { error: check.error }
+    try {
+      const stat = fs.statSync(check.resolved)
+      if (stat.size > 2 * 1024 * 1024) return { error: '文件超过 2MB,无法读取' }
+      const content = fs.readFileSync(check.resolved, 'utf-8')
+      return { content }
+    } catch (e: any) {
+      return { error: e?.message || String(e) }
+    }
+  })
+
+  ipcMain.handle('agent-tool-list-dir', async (_, args: { path: string }) => {
+    const check = ensureAllowed(args.path)
+    if (!check.ok) return { error: check.error }
+    try {
+      const entries = fs.readdirSync(check.resolved, { withFileTypes: true })
+      const items = entries.slice(0, 500).map(e => ({
+        name: e.name,
+        type: e.isDirectory() ? 'dir' : e.isFile() ? 'file' : 'other'
+      }))
+      return { items, truncated: entries.length > 500 }
+    } catch (e: any) {
+      return { error: e?.message || String(e) }
+    }
+  })
+
+  ipcMain.handle('agent-tool-search-files', async (_, args: { path: string; pattern: string; contentMatch?: string }) => {
+    const check = ensureAllowed(args.path)
+    if (!check.ok) return { error: check.error }
+    try {
+      const results: Array<{ path: string; type: 'name' | 'content' }> = []
+      const pattern = args.pattern || ''
+      const re = pattern ? new RegExp(pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*'), 'i') : null
+      const contentRe = args.contentMatch ? new RegExp(args.contentMatch, 'i') : null
+      const walk = (dir: string, depth: number) => {
+        if (results.length >= 100 || depth > 6) return
+        let entries: fs.Dirent[]
+        try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+        for (const e of entries) {
+          if (results.length >= 100) break
+          if (e.name.startsWith('.') || e.name === 'node_modules') continue
+          const full = path.join(dir, e.name)
+          if (e.isDirectory()) {
+            walk(full, depth + 1)
+          } else if (e.isFile()) {
+            if (re && re.test(e.name)) results.push({ path: full, type: 'name' })
+            else if (contentRe) {
+              try {
+                const stat = fs.statSync(full)
+                if (stat.size > 1024 * 1024) continue
+                const text = fs.readFileSync(full, 'utf-8')
+                if (contentRe.test(text)) results.push({ path: full, type: 'content' })
+              } catch {}
+            }
+          }
+        }
+      }
+      walk(check.resolved, 0)
+      return { results, truncated: results.length >= 100 }
+    } catch (e: any) {
+      return { error: e?.message || String(e) }
+    }
+  })
+
+  ipcMain.handle('agent-tool-write-file', async (_, args: { path: string; content: string }) => {
+    const check = ensureAllowed(args.path)
+    if (!check.ok) return { error: check.error }
+    try {
+      fs.mkdirSync(path.dirname(check.resolved), { recursive: true })
+      fs.writeFileSync(check.resolved, args.content ?? '', 'utf-8')
+      return { success: true, path: check.resolved }
+    } catch (e: any) {
+      return { error: e?.message || String(e) }
+    }
+  })
+
+  ipcMain.handle('agent-tool-move-file', async (_, args: { from: string; to: string }) => {
+    const a = ensureAllowed(args.from)
+    if (!a.ok) return { error: a.error }
+    const b = ensureAllowed(args.to)
+    if (!b.ok) return { error: b.error }
+    try {
+      fs.mkdirSync(path.dirname(b.resolved), { recursive: true })
+      fs.renameSync(a.resolved, b.resolved)
+      return { success: true, from: a.resolved, to: b.resolved }
+    } catch (e: any) {
+      return { error: e?.message || String(e) }
+    }
+  })
+
+  ipcMain.handle('agent-tool-delete-file', async (_, args: { path: string }) => {
+    const check = ensureAllowed(args.path)
+    if (!check.ok) return { error: check.error }
+    try {
+      await shell.trashItem(check.resolved)
+      return { success: true, path: check.resolved }
+    } catch (e: any) {
+      return { error: e?.message || String(e) }
+    }
   })
 }
 

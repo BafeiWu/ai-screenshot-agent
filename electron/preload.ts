@@ -25,6 +25,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveSettings: (settings: any) =>
     ipcRenderer.invoke('save-settings', settings),
 
+  getAiProfiles: () =>
+    ipcRenderer.invoke('get-ai-profiles'),
+
+  saveAiProfiles: (payload: { profiles: any[]; activeId: string }) =>
+    ipcRenderer.invoke('save-ai-profiles', payload),
+
   getHistory: () =>
     ipcRenderer.invoke('get-history'),
 
@@ -141,5 +147,65 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('get-favorites'),
 
   saveFavorites: (favorites: any[]) =>
-    ipcRenderer.invoke('save-favorites', favorites)
+    ipcRenderer.invoke('save-favorites', favorites),
+
+  aiStreamRequest: (payload: { requestId: string; endpoint: string; apiKey: string; body: any; headers?: Record<string, string> }) =>
+    ipcRenderer.invoke('ai-stream-request', payload),
+
+  aiStreamAbort: (requestId: string) =>
+    ipcRenderer.invoke('ai-stream-abort', requestId),
+
+  onAiStreamChunk: (callback: (data: { requestId: string; chunk: string }) => void) => {
+    const listener = (_: any, data: any) => callback(data)
+    ipcRenderer.on('ai-stream-chunk', listener)
+    return () => ipcRenderer.removeListener('ai-stream-chunk', listener)
+  },
+
+  onAiStreamError: (callback: (data: { requestId: string; message: string; aborted?: boolean }) => void) => {
+    const listener = (_: any, data: any) => callback(data)
+    ipcRenderer.on('ai-stream-error', listener)
+    return () => ipcRenderer.removeListener('ai-stream-error', listener)
+  },
+
+  onAiStreamDone: (callback: (data: { requestId: string }) => void) => {
+    const listener = (_: any, data: any) => callback(data)
+    ipcRenderer.on('ai-stream-done', listener)
+    return () => ipcRenderer.removeListener('ai-stream-done', listener)
+  },
+
+  agentGetAllowedDirs: () =>
+    ipcRenderer.invoke('agent-get-allowed-dirs'),
+
+  agentSetAllowedDirs: (dirs: string[]) =>
+    ipcRenderer.invoke('agent-set-allowed-dirs', dirs),
+
+  agentPickDirectory: () =>
+    ipcRenderer.invoke('agent-pick-directory'),
+
+  agentReadFile: (args: { path: string }) =>
+    ipcRenderer.invoke('agent-tool-read-file', args),
+
+  agentListDir: (args: { path: string }) =>
+    ipcRenderer.invoke('agent-tool-list-dir', args),
+
+  agentSearchFiles: (args: { path: string; pattern: string; contentMatch?: string }) =>
+    ipcRenderer.invoke('agent-tool-search-files', args),
+
+  agentFetchUrl: (args: { url: string }) =>
+    ipcRenderer.invoke('agent-tool-fetch-url', args),
+
+  agentExtractLinks: (args: { url: string }) =>
+    ipcRenderer.invoke('agent-tool-extract-links', args),
+
+  agentDownloadUrl: (args: { url: string; path: string }) =>
+    ipcRenderer.invoke('agent-tool-download-url', args),
+
+  agentWriteFile: (args: { path: string; content: string }) =>
+    ipcRenderer.invoke('agent-tool-write-file', args),
+
+  agentMoveFile: (args: { from: string; to: string }) =>
+    ipcRenderer.invoke('agent-tool-move-file', args),
+
+  agentDeleteFile: (args: { path: string }) =>
+    ipcRenderer.invoke('agent-tool-delete-file', args)
 })
