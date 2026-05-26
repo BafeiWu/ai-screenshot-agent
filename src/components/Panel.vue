@@ -1675,7 +1675,7 @@ onUnmounted(() => {
                         <span v-else>异常</span>
                       </span>
                     </div>
-                    <div class="agent-tool-target" v-if="t.input?.path || t.input?.from">{{ t.input.path || t.input.from }}</div>
+                    <div class="agent-tool-target" v-if="t.input?.path || t.input?.from || t.input?.url">{{ t.input.path || t.input.from || t.input.url }}</div>
                   </div>
                   <!-- <span class="agent-tool-status">
                     <span v-if="t.status === 'running'">…</span>

@@ -191,6 +191,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   agentSearchFiles: (args: { path: string; pattern: string; contentMatch?: string }) =>
     ipcRenderer.invoke('agent-tool-search-files', args),
 
+  agentFetchUrl: (args: { url: string }) =>
+    ipcRenderer.invoke('agent-tool-fetch-url', args),
+
+  agentExtractLinks: (args: { url: string }) =>
+    ipcRenderer.invoke('agent-tool-extract-links', args),
+
+  agentDownloadUrl: (args: { url: string; path: string }) =>
+    ipcRenderer.invoke('agent-tool-download-url', args),
+
   agentWriteFile: (args: { path: string; content: string }) =>
     ipcRenderer.invoke('agent-tool-write-file', args),
 

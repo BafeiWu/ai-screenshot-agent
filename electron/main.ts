@@ -967,6 +967,121 @@ function setupIPC() {
     return { ok: true, resolved }
   }
 
+  const parseHttpUrl = (raw: string): URL | null => {
+    try {
+      const u = new URL(raw)
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return null
+      return u
+    } catch {
+      return null
+    }
+  }
+
+  const stripHtml = (html: string): string => {
+    return html
+      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/\s+/g, ' ')
+      .trim()
+  }
+
+  const extractLinks = (html: string, baseUrl: string) => {
+    const links: Array<{ url: string; text: string }> = []
+    const re = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi
+    let m: RegExpExecArray | null
+    while ((m = re.exec(html)) && links.length < 200) {
+      try {
+        const url = new URL(m[1], baseUrl).toString()
+        const text = stripHtml(m[2]).slice(0, 160)
+        if (url.startsWith('http://') || url.startsWith('https://')) links.push({ url, text })
+      } catch {}
+    }
+    return links
+  }
+
+  ipcMain.handle('agent-tool-fetch-url', async (_, args: { url: string }) => {
+    const u = parseHttpUrl(String(args.url || ''))
+    if (!u) return { error: '仅支持 http/https URL' }
+    try {
+      const res = await fetch(u.toString(), {
+        headers: {
+          'user-agent': 'Mozilla/5.0 SnapAI-Agent/1.0'
+        }
+      })
+      const contentType = res.headers.get('content-type') || ''
+      const text = await res.text()
+      const limited = text.slice(0, 500_000)
+      const title = limited.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.replace(/\s+/g, ' ').trim() || ''
+      return {
+        url: u.toString(),
+        status: res.status,
+        contentType,
+        title,
+        text: contentType.includes('html') ? stripHtml(limited).slice(0, 80_000) : limited.slice(0, 80_000),
+        truncated: text.length > limited.length
+      }
+    } catch (e: any) {
+      return { error: e?.message || String(e) }
+    }
+  })
+
+  ipcMain.handle('agent-tool-extract-links', async (_, args: { url: string }) => {
+    const u = parseHttpUrl(String(args.url || ''))
+    if (!u) return { error: '仅支持 http/https URL' }
+    try {
+      const res = await fetch(u.toString(), {
+        headers: {
+          'user-agent': 'Mozilla/5.0 SnapAI-Agent/1.0'
+        }
+      })
+      const html = await res.text()
+      return {
+        url: u.toString(),
+        status: res.status,
+        links: extractLinks(html.slice(0, 1_500_000), u.toString())
+      }
+    } catch (e: any) {
+      return { error: e?.message || String(e) }
+    }
+  })
+
+  ipcMain.handle('agent-tool-download-url', async (_, args: { url: string; path: string }) => {
+    const u = parseHttpUrl(String(args.url || ''))
+    if (!u) return { error: '仅支持 http/https URL' }
+    const check = ensureAllowed(String(args.path || ''))
+    if (!check.ok) return { error: check.error }
+    try {
+      const res = await fetch(u.toString(), {
+        headers: {
+          'user-agent': 'Mozilla/5.0 SnapAI-Agent/1.0'
+        }
+      })
+      if (!res.ok) return { error: `下载失败: HTTP ${res.status}` }
+      const contentLength = Number(res.headers.get('content-length') || 0)
+      if (contentLength > 100 * 1024 * 1024) return { error: '文件超过 100MB, 已拒绝下载' }
+      const bytes = Buffer.from(await res.arrayBuffer())
+      if (bytes.byteLength > 100 * 1024 * 1024) return { error: '文件超过 100MB, 已拒绝下载' }
+      fs.mkdirSync(path.dirname(check.resolved), { recursive: true })
+      fs.writeFileSync(check.resolved, bytes)
+      return {
+        success: true,
+        url: u.toString(),
+        path: check.resolved,
+        bytes: bytes.byteLength,
+        contentType: res.headers.get('content-type') || ''
+      }
+    } catch (e: any) {
+      return { error: e?.message || String(e) }
+    }
+  })
+
   ipcMain.handle('agent-tool-read-file', async (_, args: { path: string }) => {
     const check = ensureAllowed(args.path)
     if (!check.ok) return { error: check.error }

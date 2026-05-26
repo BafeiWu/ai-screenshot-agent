@@ -296,6 +296,40 @@ export const useScreenshotStore = defineStore('screenshot', () => {
       }
     },
     {
+      name: 'fetch_url',
+      description: '读取公开网页或文本 URL 的内容。只支持 http/https, 返回页面标题、正文文本、状态码和内容类型。适合查看网页内容, 不会保存文件。',
+      input_schema: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: '要读取的 http/https URL' }
+        },
+        required: ['url']
+      }
+    },
+    {
+      name: 'extract_links',
+      description: '从公开网页中提取链接列表。适合先查找 PDF、图片、zip、文档等下载地址。',
+      input_schema: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: '要解析链接的网页 URL' }
+        },
+        required: ['url']
+      }
+    },
+    {
+      name: 'download_url',
+      description: '从 http/https URL 下载文件到本机已授权目录。path 必须是完整保存路径, 且位于 Agent 允许目录内。单文件限制 100MB。',
+      input_schema: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: '要下载的文件 URL' },
+          path: { type: 'string', description: '保存到本机的完整绝对路径, 必须在 Agent 允许目录内' }
+        },
+        required: ['url', 'path']
+      }
+    },
+    {
       name: 'write_file',
       description: '创建或覆盖文件,自动建上层目录。',
       input_schema: {
@@ -351,6 +385,15 @@ export const useScreenshotStore = defineStore('screenshot', () => {
             path: String(input?.path || ''),
             pattern: String(input?.pattern || ''),
             contentMatch: input?.contentMatch ? String(input.contentMatch) : undefined
+          })
+        case 'fetch_url':
+          return await window.electronAPI.agentFetchUrl({ url: String(input?.url || '') })
+        case 'extract_links':
+          return await window.electronAPI.agentExtractLinks({ url: String(input?.url || '') })
+        case 'download_url':
+          return await window.electronAPI.agentDownloadUrl({
+            url: String(input?.url || ''),
+            path: String(input?.path || '')
           })
         case 'write_file':
           return await window.electronAPI.agentWriteFile({
@@ -675,6 +718,9 @@ declare global {
       agentReadFile: (args: { path: string }) => Promise<{ content?: string; error?: string }>
       agentListDir: (args: { path: string }) => Promise<{ items?: Array<{ name: string; type: string }>; truncated?: boolean; error?: string }>
       agentSearchFiles: (args: { path: string; pattern: string; contentMatch?: string }) => Promise<{ results?: Array<{ path: string; type: string }>; truncated?: boolean; error?: string }>
+      agentFetchUrl: (args: { url: string }) => Promise<{ url?: string; status?: number; contentType?: string; title?: string; text?: string; truncated?: boolean; error?: string }>
+      agentExtractLinks: (args: { url: string }) => Promise<{ url?: string; status?: number; links?: Array<{ url: string; text: string }>; error?: string }>
+      agentDownloadUrl: (args: { url: string; path: string }) => Promise<{ success?: boolean; url?: string; path?: string; bytes?: number; contentType?: string; error?: string }>
       agentWriteFile: (args: { path: string; content: string }) => Promise<{ success?: boolean; path?: string; error?: string }>
       agentMoveFile: (args: { from: string; to: string }) => Promise<{ success?: boolean; from?: string; to?: string; error?: string }>
       agentDeleteFile: (args: { path: string }) => Promise<{ success?: boolean; path?: string; error?: string }>
